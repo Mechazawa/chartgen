@@ -1,16 +1,15 @@
-# Inference + chart generation. Verified on Python 3.14 (Windows).
+# Inference + chart generation. Verified on Python 3.14.
 #
-# torch/torchaudio are deliberately NOT pinned here — install them first from the
-# right index for the machine, because plain `pip install torch` on Windows gives
-# a CPU-only build and would silently waste a GPU:
+# torch/torchaudio are deliberately NOT pinned here. Install them first from the
+# right index for the machine, so a GPU machine gets the CUDA build:
 #
 #   CPU:   pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cpu
 #   CUDA:  pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu126
 #
-# basic-pitch is also NOT here: its wheel declares `tensorflow<2.15.1` on Windows
-# for Python >= 3.11, which has no build and makes pip refuse to install it. It
-# is installed with --no-deps (the ONNX backend needs only onnxruntime, listed
-# below). setup.ps1 does all of this for you.
+# basic-pitch is also NOT here: its wheel declares a tensorflow requirement for
+# Python >= 3.11 that has no build, so pip refuses to install it. It is
+# installed with --no-deps (the ONNX backend needs only onnxruntime, listed
+# below). scripts/install.sh does all of this for you.
 
 # --- note transcription (Basic Pitch, Apache-2.0; runs on the bundled ONNX model)
 onnxruntime==1.28.0

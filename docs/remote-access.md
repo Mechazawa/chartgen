@@ -1,6 +1,6 @@
 # Charting from anywhere: Cloudflare Tunnel + Access
 
-The web UI (`chartgen-web.bat`) turns the PC with the GPU into a private
+The web UI (`scripts/chartgen-web.sh`) turns the PC with the GPU into a private
 charting service for you and people you choose. Nothing is exposed on your
 router, your home IP is never published, and a login wall sits in front of
 the app before any request reaches your machine. All of it is on
@@ -26,12 +26,13 @@ The PC has to be on for any of this to work; if it sleeps, the tunnel drops.
 
 1. Cloudflare dashboard → **Zero Trust** → **Networks** → **Tunnels** →
    **Create a tunnel** → *Cloudflared* → name it `chartgen`.
-2. Pick **Windows 64-bit**. It shows a one-line install command containing
-   your tunnel token. Run it in an **administrator** PowerShell. That installs
-   `cloudflared` as a Windows service that starts with the PC.
+2. Pick your Linux distribution. The dashboard shows how to install
+   `cloudflared` and a `sudo cloudflared service install <token>` command.
+   Run both. That installs `cloudflared` as a systemd service that starts
+   with the PC.
 3. Under **Public Hostname** → **Add a public hostname**:
    subdomain `app`, domain `chartgen.org`, type **HTTP**,
-   URL `localhost:8471`. Save. Cloudflare creates the DNS record itself.
+   URL `127.0.0.1:8471`. Save. Cloudflare creates the DNS record itself.
 
 ## 2. Put a login in front of it
 
@@ -49,30 +50,41 @@ your network can reach it without going through Access.
 
 ## 3. Tell chartgen who the owners are
 
-Set the environment variable once (System Properties → Environment
-Variables, or in an admin PowerShell):
+The owners are the emails in `CHARTGEN_WEB_OWNERS`. Comma-separate several
+addresses. Anyone signed in with another address is a guest. For a quick
+test, set it on the command line:
 
 ```
-[Environment]::SetEnvironmentVariable("CHARTGEN_WEB_OWNERS", "you@example.com", "User")
+CHARTGEN_WEB_OWNERS=you@example.com scripts/chartgen-web.sh
 ```
-
-Comma-separate several addresses. Anyone signed in with another address is
-a guest.
 
 ## 4. Keep the web UI running
 
-Create a scheduled task that runs at logon:
+Run it as a systemd user service. Create
+`~/.config/systemd/user/chartgen-web.service`:
 
 ```
-schtasks /Create /TN "chartgen web" /SC ONLOGON /RL LIMITED ^
-  /TR "\"C:\path\to\chartgen\.venv\Scripts\pythonw.exe\" -m chartgen.web" ^
-  /IT
+[Unit]
+Description=chartgen web UI
+
+[Service]
+ExecStart=/path/to/chartgen/scripts/chartgen-web.sh
+Environment=CHARTGEN_WEB_OWNERS=you@example.com
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
 ```
 
-(`pythonw.exe` so there is no console window; the working directory must be
-the chartgen folder, so put the task's *Start in* field to it if you create
-it through the Task Scheduler UI instead.) Or simply run `chartgen-web.bat`
-and leave the window open.
+Then start it, and let it run without a login session:
+
+```
+systemctl --user daemon-reload
+systemctl --user enable --now chartgen-web
+loginctl enable-linger "$USER"
+```
+
+Read its log with `journalctl --user -u chartgen-web -f`.
 
 ## 5. Test it
 

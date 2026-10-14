@@ -27,31 +27,16 @@ the record of why the pipeline looks the way it does.
 
 ## Installing on a new machine
 
-1. Unzip anywhere.
-2. **Double-click `install.bat`.**
-3. **Double-click `chartgen.bat`.**
+Run `scripts/install.sh`, then `scripts/chartgen.sh`.
 
-`install.bat` finds a usable Python (3.10-3.14 *with tkinter* — the UI needs it,
-and some trimmed installs omit tcl/tk), offers to install one if there is none,
-detects whether the machine has an NVIDIA GPU and installs the matching torch
-build, then runs the self-checks so a broken setup fails loudly instead of at
-first use. Needs internet: roughly 3 GB of packages, plus ~1 GB of model on the
-first chart.
+The installer checks for Python 3.10-3.14 *with tkinter* (the UI needs it),
+uses the CUDA torch build when `nvidia-smi` works, then runs the self-checks so
+a broken setup fails loudly instead of at first use. Needs internet: roughly
+3 GB of packages, plus ~1 GB of model on the first chart.
 
-It goes through `install.bat` rather than letting you double-click `setup.ps1`
-because PowerShell blocks unsigned scripts by default — a double-clicked `.ps1`
-silently does nothing. The `-ExecutionPolicy Bypass` applies to that one run and
-changes no machine settings.
-
-Useful flags: `install.bat -Cpu` to force the CPU build, `install.bat -Training`
-to add lightning/hydra/wandb, `install.bat -CudaTag cu128` if your driver is new
-enough to prefer it.
-
-**Moving the project:** run `.\package.ps1`. It zips to ~0.26 MB, excluding
-`.venv` (1 GB, and it hardcodes absolute interpreter and project paths, so it
-cannot be copied) and generated output. `vendor/` *is* included — it is
-gitignored, so a git clone would not carry it, and audio2chart has no license, so
-keep the archive to yourself.
+Useful flags: `--cpu` to force the CPU build, `--training` to add
+lightning/hydra/wandb, `--cuda-tag cu128` if your driver is new enough to
+prefer it.
 
 Torch pins worth knowing: 2.9.1 has no `cu124` build. `cu126` (the default),
 `cu128` and `cu129` all have cp314 wheels.
@@ -775,6 +760,6 @@ tools/                   calibration studies against the human chart library
 vendor/                  EasyChartGenerator (MIT), ChartFormats (spec)
 ```
 
-Setup: `install.bat` (see above), or `python -m venv .venv`, install
+Setup: `scripts/install.sh` (see above), or `python -m venv .venv`, install
 `torch torchaudio` from the right index, then `pip install -r requirements.txt`.
 Works on Python 3.14.

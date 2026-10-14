@@ -10,9 +10,10 @@ Phases, cheapest-certain first so an early stop still yields answers:
      then sweep both.
 
 Everything is logged to work/recal_overnight.log and the final numbers to
-work/recal_report.txt. Launch detached with tools/recal_overnight.ps1.
+work/recal_report.txt. To run it detached from the terminal:
 
-    python tools/recal_overnight.py --taps-limit 800
+    nohup .venv/bin/python -u tools/recal_overnight.py --taps-limit 800 \
+        > work/recal_overnight.log 2> work/recal_overnight.err &
 """
 import argparse
 import os
