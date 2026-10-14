@@ -34,11 +34,15 @@ OFFSET_REFINE_S, OFFSET_BIN_S = 0.05, 0.005
 HOLDOUT_SHARE = 0.1
 VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
-TRANSITION_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
+# Larger weights push the share of repeated shapes far past the official
+# charts' (about 38%) without improving agreement.
+DECODE_WEIGHTS = [(transition, relation) for transition in (0.0, 0.05, 0.1, 0.2)
+                  for relation in (0.0, 0.1, 0.2, 0.3)]
 SWEEP = {"width": (64, 128, 256), "layers": (2, 4, 6), "dropout": (0.1, 0.2, 0.3),
          "lr": (1e-4, 3e-4, 1e-3)}
 DEFAULT = {"width": 128, "layers": 4, "dropout": 0.2, "lr": 3e-4}
 BUTTON_COUNT = torch.tensor([shape.bit_count() for shape in range(1 << ghl.BUTTONS)])
+RELATION_OF = torch.from_numpy(ghl.RELATION_OF)
 # A shape the official charts use fewer times than this on a tier is
 # never emitted there (Easy, for one, is white-row only).
 MIN_SHAPE_USES = 20
@@ -178,14 +182,20 @@ def shape_loss(device):
         x, pad = stack(items, "x", np.float32)
         y, _ = stack(items, "shapes", np.int64)
         y[pad] = -1
-        logits = model(x.to(device), pad.to(device)).float()
+        out = model(x.to(device), pad.to(device)).float()
+        logits, relation_logits = out[..., :1 << ghl.BUTTONS], out[..., 1 << ghl.BUTTONS:]
         y = y.to(device)
         real = y >= 0
+        relation = torch.full_like(y, -1)
+        both = real[:, 1:] & real[:, :-1]
+        relation[:, 1:][both] = RELATION_OF.to(device)[y[:, :-1][both], y[:, 1:][both]]
         guess = logits.argmax(-1)
         buttons = BUTTON_COUNT.to(device)
         metrics = {"exact_shape": (guess == y)[real].float().mean().item(),
-                   "chord_size": (buttons[guess] == buttons[y.clamp(min=0)])[real].float().mean().item()}
-        return ce(logits.flatten(0, 1), y.flatten()), metrics
+                   "chord_size": (buttons[guess] == buttons[y.clamp(min=0)])[real].float().mean().item(),
+                   "relation": (relation_logits.argmax(-1) == relation)[relation >= 0].float().mean().item()}
+        loss = ce(logits.flatten(0, 1), y.flatten()) + ce(relation_logits.flatten(0, 1), relation.flatten())
+        return loss, metrics
     return loss_of
 
 
@@ -229,18 +239,28 @@ def structure_score(pred: np.ndarray, truth: np.ndarray) -> np.ndarray:
                      (ours[2] == theirs[2])[both].sum(), both.sum()])
 
 
-def pick_weight(shape_net, songs, device, allowed, moves) -> float:
-    """The transition weight with the best mean of size, row and move
-    agreement on the validation songs."""
+def repeat_rate(sequences) -> float:
+    return float(np.mean(np.concatenate([s[1:] == s[:-1] for s in sequences])))
+
+
+def pick_decoding(shape_net, songs, device, allowed, moves) -> tuple[float, float]:
+    """The (transition, relation) weights with the best mean of size, row
+    and move agreement on the validation songs, less how far the share of
+    repeated shapes strays from the official charts'. Agreement alone
+    rewards a chart that never moves."""
     logits = [ghl.windowed(shape_net, s["x"].astype(np.float32), device) for s in songs]
     total = sum(len(s["shapes"]) for s in songs)
-    best = (-1.0, 0.0)
-    for weight in TRANSITION_WEIGHTS:
-        hits = sum(structure_score(ghl.viterbi(lg, moves, allowed, weight), s["shapes"])
-                   for lg, s in zip(logits, songs, strict=True))
-        score = (hits[1] / total + hits[2] / total + hits[3] / max(hits[4], 1)) / 3
-        print(f"  transition weight {weight}: validation score {score:.1%}", flush=True)
-        best = max(best, (score, weight))
+    official = repeat_rate([s["shapes"] for s in songs])
+    best = (-np.inf, DECODE_WEIGHTS[0])
+    for weights in DECODE_WEIGHTS:
+        preds = [ghl.viterbi(lg, moves, allowed, *weights) for lg in logits]
+        hits = sum(structure_score(pred, s["shapes"]) for pred, s in zip(preds, songs, strict=True))
+        agreement = (hits[1] / total + hits[2] / total + hits[3] / max(hits[4], 1)) / 3
+        repeats = repeat_rate(preds)
+        score = agreement - abs(repeats - official)
+        print(f"  decode weights {weights}: agreement {agreement:.1%}, repeats {repeats:.0%} "
+              f"(official {official:.0%}), score {score:.3f}", flush=True)
+        best = max(best, (score, weights))
     return best[1]
 
 
@@ -269,15 +289,17 @@ def structure(shapes: np.ndarray):
     return np.minimum(np.bitwise_count(shapes), 3), row, np.sign(np.diff(column, append=np.nan))
 
 
-def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weight, board) -> None:
+def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weights, board) -> None:
     shape_net.eval()
     reduce_net.eval()
     hits = np.zeros(5)  # exact, size, row, move, fretted pairs
     total = 0
     tier_stats = np.zeros((len(ghl.TIERS), 4))  # tp, fp, fn, same shape among tp
+    preds = []
     for song in songs:
         x = song["x"].astype(np.float32)
-        pred = ghl.viterbi(ghl.windowed(shape_net, x, device), moves, allowed["Expert"], weight)
+        pred = ghl.viterbi(ghl.windowed(shape_net, x, device), moves, allowed["Expert"], *weights)
+        preds.append(pred)
         hits += structure_score(pred, song["shapes"])
         total += len(pred)
         out = ghl.windowed(reduce_net, reduce_x(song, song["shapes"]), device)
@@ -289,7 +311,9 @@ def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weight, board
         tier_stats[:, 2] += (~kept & truth).sum(0)
         tier_stats[:, 3] += ((tier_pred == song["tier_shapes"]) & kept & truth).sum(0)
     scores = {"expert_exact": hits[0] / total, "expert_size": hits[1] / total,
-              "expert_row": hits[2] / total, "expert_move": hits[3] / max(hits[4], 1)}
+              "expert_row": hits[2] / total, "expert_move": hits[3] / max(hits[4], 1),
+              "expert_repeats": repeat_rate(preds),
+              "official_repeats": repeat_rate([s["shapes"] for s in songs])}
     for k, tier in enumerate(ghl.TIERS):
         tp, fp, fn, same = tier_stats[k]
         scores |= {f"{tier}_keep_precision": tp / max(tp + fp, 1),
@@ -342,12 +366,12 @@ def main(argv=None):
                            f"reduce {reduce_config}")
     allowed = allowed_shapes(train_songs)
     moves = transitions(train_songs)
-    weight = pick_weight(shape_net, val_songs, device, allowed["Expert"], moves)
-    board.add_scalar("holdout/transition_weight", weight)
-    evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weight, board)
+    weights = pick_decoding(shape_net, val_songs, device, allowed["Expert"], moves)
+    board.add_text("decode_weights", str(weights))
+    evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weights, board)
     torch.save({"shape": {k: v.half() for k, v in shape_net.state_dict().items()},
                 "reduce": {k: v.half() for k, v in reduce_net.state_dict().items()},
-                "allowed": allowed, "transitions": torch.from_numpy(moves), "transition_weight": weight,
+                "allowed": allowed, "transitions": torch.from_numpy(moves), "decode_weights": weights,
                 "keep_share": keep_share(train_songs),
                 "config": {"shape": shape_config, "reduce": reduce_config},
                 "holdout": sorted(holdout)}, args.out)

@@ -39,6 +39,28 @@ def class_lanes(shape: int) -> list[int]:
     return [b for b in range(BUTTONS) if shape >> b & 1] or [OPEN]
 
 
+# How a shape relates to the one before it: the same shape, the same
+# column (another row or size), a column further up or down the neck, or
+# a change to or from an open note.
+SAME, SAME_COLUMN, UP, DOWN, TO_OPEN, FROM_OPEN = range(6)
+RELATIONS = 6
+
+
+def _relation(prev: int, cur: int) -> int:
+    if prev == cur:
+        return SAME
+    if not cur:
+        return TO_OPEN
+    if not prev:
+        return FROM_OPEN
+    column = [np.mean([b % 3 for b in class_lanes(shape)]) for shape in (prev, cur)]
+    return SAME_COLUMN if column[0] == column[1] else UP if column[1] > column[0] else DOWN
+
+
+RELATION_OF = np.array([[_relation(a, b) for b in range(1 << BUTTONS)]
+                        for a in range(1 << BUTTONS)])
+
+
 def _pitch_rows(events, times: np.ndarray, sounding: bool) -> np.ndarray:
     """[N, 88] max amplitude per pitch of the events starting near (or, with
     sounding, held across) each time."""
@@ -108,12 +130,13 @@ class _Encoder(nn.Module):
 
 
 class ShapeNet(nn.Module):
-    """Per position: logits over the 64 button bitmasks."""
+    """Per position: logits over the 64 button bitmasks, then logits over
+    the RELATIONS to the previous position's shape."""
 
     def __init__(self, width: int = 128, layers: int = 4, dropout: float = 0.2):
         super().__init__()
         self.encoder = _Encoder(N_FEATURES, width, layers, dropout)
-        self.head = nn.Linear(width, 1 << BUTTONS)
+        self.head = nn.Linear(width, (1 << BUTTONS) + RELATIONS)
 
     def forward(self, x, pad):
         return self.head(self.encoder(x, pad))
@@ -191,8 +214,8 @@ def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
     times = np.array([tempo.beat_to_time(t / res) for t in ticks])
     sustain_s = np.array([tempo.beat_to_time((t + sustain_of[t]) / res) for t in ticks]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)
-    shapes = viterbi(windowed(shape_net, x, device), saved["transitions"].cpu().numpy(), allowed["Expert"],
-                     saved["transition_weight"])
+    shapes = viterbi(windowed(shape_net, x, device), saved["transitions"].cpu().numpy(),
+                     allowed["Expert"], *saved["decode_weights"])
     reduced = windowed(reduce_net, reduce_inputs(shapes, x[:, -SCALARS:]), device)
 
     def notes(keep, tier_shapes):
@@ -209,23 +232,30 @@ def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
     return out
 
 
-def viterbi(logits: np.ndarray, transitions: np.ndarray, allowed, weight: float) -> np.ndarray:
-    """The shape sequence that maximises the model's per-position log
-    probabilities plus weight x the official charts' shape-to-shape log
-    probabilities, over the allowed shapes only."""
-    logp = logits - np.logaddexp.reduce(logits, axis=1, keepdims=True)
-    banned = np.ones(logits.shape[1], bool)
+def _log_softmax(logits: np.ndarray) -> np.ndarray:
+    return logits - np.logaddexp.reduce(logits, axis=-1, keepdims=True)
+
+
+def viterbi(logits: np.ndarray, transitions: np.ndarray, allowed,
+            transition_weight: float, relation_weight: float) -> np.ndarray:
+    """The allowed shape sequence with the best total of: each position's
+    shape log probability, transition_weight x the official charts'
+    shape-to-shape log probability, and relation_weight x the model's log
+    probability of how each shape relates to the one before it."""
+    shapes = _log_softmax(logits[:, :1 << BUTTONS])
+    relations = _log_softmax(logits[:, 1 << BUTTONS:])
+    banned = np.ones(shapes.shape[1], bool)
     banned[list(allowed)] = False
-    logp[:, banned] = -np.inf
-    step = weight * transitions
-    score = logp[0].copy()
-    back = np.zeros(logp.shape, dtype=np.int64)
-    for i in range(1, len(logp)):
-        candidates = score[:, None] + step
+    shapes[:, banned] = -np.inf
+    score = shapes[0].copy()
+    back = np.zeros(shapes.shape, dtype=np.int64)
+    for i in range(1, len(shapes)):
+        candidates = (score[:, None] + transition_weight * transitions
+                      + relation_weight * relations[i][RELATION_OF])
         back[i] = candidates.argmax(0)
-        score = candidates.max(0) + logp[i]
-    path = np.zeros(len(logp), dtype=np.int64)
+        score = candidates.max(0) + shapes[i]
+    path = np.zeros(len(shapes), dtype=np.int64)
     path[-1] = score.argmax()
-    for i in range(len(logp) - 1, 0, -1):
+    for i in range(len(shapes) - 1, 0, -1):
         path[i - 1] = back[i, path[i]]
     return path
