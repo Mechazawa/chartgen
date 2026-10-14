@@ -93,7 +93,8 @@ echo "installing basic-pitch ..."
 if ((training)); then
     echo "installing training stack ..."
     "$py" -m pip install pytorch-lightning==2.5.6 lightning==2.5.5 \
-        hydra-core==1.3.2 omegaconf==2.3.0 torchmetrics==1.8.2 wandb==0.22.2
+        hydra-core==1.3.2 omegaconf==2.3.0 torchmetrics==1.8.2 wandb==0.22.2 \
+        tensorboard==2.21.0
 fi
 
 echo "--- verifying ---"

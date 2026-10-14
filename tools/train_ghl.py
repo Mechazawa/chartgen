@@ -5,6 +5,9 @@ song folders for the audio delay in each song.ini. Songs are
 split by artist and title, so a song that exists both on disc and on GHTV
 never sits on both sides of the split. Writes chartgen/ghl_model.pt.
 
+Losses and validation metrics stream to TensorBoard under --runs; watch
+them with `tensorboard --logdir data/ghl-runs --host 127.0.0.1`.
+
     python -m tools.train_ghl data/ghl-features --charts data/ghl-official
 """
 import argparse
@@ -12,11 +15,13 @@ import pickle
 import random
 import re
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch import nn
+from torch.utils.tensorboard import SummaryWriter
 
 from chartgen import ghl
 
@@ -30,6 +35,7 @@ VALIDATE_EVERY = 250
 # absolute pitch rows move; the song-centred rows already ignore the key.
 TRANSPOSE = 3
 ABSOLUTE_ROWS = (len(ghl.STREAMS) + 2) * ghl.PITCHES
+BUTTON_COUNT = torch.tensor([shape.bit_count() for shape in range(1 << ghl.BUTTONS)])
 # A shape the official charts use fewer times than this on a tier is
 # never emitted there (Easy, for one, is white-row only).
 MIN_SHAPE_USES = 20
@@ -112,8 +118,9 @@ def reduce_x(item, shapes):
     return ghl.reduce_inputs(shapes, item["x"][:, -ghl.SCALARS:].astype(np.float32))
 
 
-def train(model, songs, val_songs, steps, batch, lr, device, loss_of):
-    """Train, then keep the weights with the lowest validation loss."""
+def train(model, songs, val_songs, steps, batch, lr, device, loss_of, board, tag):
+    """Train, then keep the weights with the lowest validation loss. loss_of
+    returns (loss, {metric: value}); both go to the board under tag."""
     rng = random.Random(0)
     val_batches = [crops(val_songs, random.Random(i), batch) for i in range(8)]
     model.to(device)
@@ -123,16 +130,25 @@ def train(model, songs, val_songs, steps, batch, lr, device, loss_of):
     for step in range(1, steps + 1):
         model.train()
         with torch.autocast(device, dtype=torch.bfloat16):
-            loss = loss_of(model, crops(songs, rng, batch, TRANSPOSE))
+            loss, _ = loss_of(model, crops(songs, rng, batch, TRANSPOSE))
         opt.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         sched.step()
+        if step % 25 == 0:
+            board.add_scalar(f"{tag}/loss/train", loss.item(), step)
+            board.add_scalar(f"{tag}/learning_rate", sched.get_last_lr()[0], step)
         if step % VALIDATE_EVERY == 0:
             model.eval()
             with torch.no_grad(), torch.autocast(device, dtype=torch.bfloat16):
-                val = float(np.mean([loss_of(model, items).item() for items in val_batches]))
+                results = [loss_of(model, items) for items in val_batches]
+            val = float(np.mean([loss.item() for loss, _ in results]))
+            board.add_scalar(f"{tag}/loss/validation", val, step)
+            for name in results[0][1]:
+                board.add_scalar(f"{tag}/validation/{name}",
+                                 float(np.mean([metrics[name] for _, metrics in results])), step)
+            board.flush()
             if val < best:
                 best, best_state = val, {k: v.detach().clone() for k, v in model.state_dict().items()}
             print(f"  step {step}/{steps} train {loss.item():.3f} val {val:.3f}", flush=True)
@@ -147,8 +163,14 @@ def shape_loss(device):
         x, pad = stack(items, "x", np.float32)
         y, _ = stack(items, "shapes", np.int64)
         y[pad] = -1
-        logits = model(x.to(device), pad.to(device))
-        return ce(logits.flatten(0, 1).float(), y.to(device).flatten())
+        logits = model(x.to(device), pad.to(device)).float()
+        y = y.to(device)
+        real = y >= 0
+        guess = logits.argmax(-1)
+        buttons = BUTTON_COUNT.to(device)
+        metrics = {"exact_shape": (guess == y)[real].float().mean().item(),
+                   "chord_size": (buttons[guess] == buttons[y.clamp(min=0)])[real].float().mean().item()}
+        return ce(logits.flatten(0, 1), y.flatten()), metrics
     return loss_of
 
 
@@ -162,8 +184,16 @@ def reduce_loss(device):
         target, _ = stack(items, "tier_shapes", np.int64)
         target[(keep == 0) | pad[..., None]] = -1
         out = model(x.to(device), pad.to(device)).float()
-        keep_loss = bce(out[..., 0], keep.to(device))[~pad.to(device)].mean()
-        return keep_loss + ce(out[..., 1:].flatten(0, 2), target.to(device).flatten())
+        keep, target, real = keep.to(device), target.to(device), ~pad.to(device)
+        keep_loss = bce(out[..., 0], keep)[real].mean()
+        metrics = {}
+        for k, tier in enumerate(ghl.TIERS):
+            guess, truth = out[..., k, 0][real] > 0, keep[..., k][real] > 0
+            metrics[f"{tier}_keep_precision"] = (guess & truth).sum().item() / max(1, guess.sum().item())
+            metrics[f"{tier}_keep_recall"] = (guess & truth).sum().item() / max(1, truth.sum().item())
+            kept = target[..., k] >= 0
+            metrics[f"{tier}_shape"] = (out[..., k, 1:].argmax(-1) == target[..., k])[kept].float().mean().item()
+        return keep_loss + ce(out[..., 1:].flatten(0, 2), target.flatten()), metrics
     return loss_of
 
 
@@ -210,6 +240,7 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("-o", "--out", type=Path, default=ghl.MODEL_PATH)
+    ap.add_argument("--runs", type=Path, default=Path("data/ghl-runs"))
     args = ap.parse_args(argv)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -229,13 +260,16 @@ def main(argv=None):
     print(f"train {len(train_songs)}, validation {len(val_songs)}, holdout {len(test_songs)}",
           flush=True)
 
+    board = SummaryWriter(args.runs / time.strftime("%Y-%m-%d_%H-%M-%S"))
+    board.add_text("data", f"{len(train_songs)} train, {len(val_songs)} validation, "
+                           f"{len(test_songs)} holdout songs")
     shape_net, reduce_net = ghl.ShapeNet(), ghl.ReduceNet()
     print("training ShapeNet", flush=True)
     train(shape_net, train_songs, val_songs, args.steps, args.batch, args.lr, device,
-          shape_loss(device))
+          shape_loss(device), board, "shape")
     print("training ReduceNet", flush=True)
     train(reduce_net, train_songs, val_songs, args.steps // 2, args.batch, args.lr, device,
-          reduce_loss(device))
+          reduce_loss(device), board, "reduce")
     evaluate(shape_net, reduce_net, test_songs, device)
     torch.save({"shape": {k: v.half() for k, v in shape_net.state_dict().items()},
                 "reduce": {k: v.half() for k, v in reduce_net.state_dict().items()},
