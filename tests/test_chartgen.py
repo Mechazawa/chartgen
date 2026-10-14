@@ -172,7 +172,8 @@ def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
         path = Path(folder) / "ghl_model.pt"
         torch.save({"shape": ghl.ShapeNet().state_dict(), "reduce": ghl.ReduceNet().state_dict(),
                     "allowed": allowed, "transitions": torch.zeros(64, 64),
-                    "transition_weight": 1.0}, path)
+                    "transition_weight": 1.0,
+                    "keep_share": {"Hard": 0.75, "Medium": 0.5, "Easy": 0.35}}, path)
         saved_path, ghl.MODEL_PATH = ghl.MODEL_PATH, path
         ghl._MODELS.clear()
         try:
@@ -184,8 +185,10 @@ def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
             ghl._MODELS.clear()
     expert_ticks = {t for t, _, _ in out["ExpertGHLGuitar"]}
     assert expert_ticks == {t for t, _, _ in expert}
-    for tier in ("Hard", "Medium", "Easy"):
-        assert {t for t, _, _ in out[f"{tier}GHLGuitar"]} <= expert_ticks, tier
+    for tier, share in (("Hard", 0.75), ("Medium", 0.5), ("Easy", 0.35)):
+        kept = {t for t, _, _ in out[f"{tier}GHLGuitar"]}
+        assert kept <= expert_ticks, tier
+        assert len(kept) == round(share * len(expert_ticks)), (tier, len(kept))
     assert {lane for _, lane, _ in out["EasyGHLGuitar"]} <= {0, 1, 2}
     medium_sizes = {}
     for tick, _, _ in out["MediumGHLGuitar"]:

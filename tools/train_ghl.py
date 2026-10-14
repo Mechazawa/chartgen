@@ -218,6 +218,12 @@ def pick_weight(shape_net, songs, device, allowed, moves) -> float:
     return best[1]
 
 
+def keep_share(songs) -> dict[str, float]:
+    """Per lower tier: the share of Expert positions the official charts keep."""
+    keep = np.concatenate([s["keep"] for s in songs])
+    return {tier: float(keep[:, k].mean()) for k, tier in enumerate(ghl.TIERS)}
+
+
 def allowed_shapes(songs) -> dict[str, list[int]]:
     expert = np.concatenate([s["shapes"] for s in songs])
     out = {"Expert": expert}
@@ -314,6 +320,7 @@ def main(argv=None):
     torch.save({"shape": {k: v.half() for k, v in shape_net.state_dict().items()},
                 "reduce": {k: v.half() for k, v in reduce_net.state_dict().items()},
                 "allowed": allowed, "transitions": torch.from_numpy(moves), "transition_weight": weight,
+                "keep_share": keep_share(train_songs),
                 "holdout": sorted(holdout)}, args.out)
     print(f"wrote {args.out}")
     return 0

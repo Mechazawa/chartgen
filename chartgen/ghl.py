@@ -200,8 +200,11 @@ def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
 
     out = {"ExpertGHLGuitar": notes(np.ones(len(ticks), bool), shapes)}
     for k, tier in enumerate(TIERS):
-        out[f"{tier}GHLGuitar"] = notes(reduced[:, k, 0] > 0,
-                                        _masked(reduced[:, k, 1:], allowed[tier]))
+        # Each tier keeps the share of Expert positions the official charts
+        # keep, taking the positions the model most wants to keep.
+        keep = np.zeros(len(ticks), bool)
+        keep[np.argsort(-reduced[:, k, 0])[:round(saved["keep_share"][tier] * len(ticks))]] = True
+        out[f"{tier}GHLGuitar"] = notes(keep, _masked(reduced[:, k, 1:], allowed[tier]))
     return out
 
 
