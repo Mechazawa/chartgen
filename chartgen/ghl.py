@@ -122,7 +122,7 @@ class _Encoder(nn.Module):
         self.pos = nn.Embedding(WINDOW, width)
         layer = nn.TransformerEncoderLayer(width, 4, 4 * width, dropout=dropout,
                                            batch_first=True, norm_first=True)
-        self.body = nn.TransformerEncoder(layer, layers)
+        self.body = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
 
     def forward(self, x, pad):
         index = torch.arange(x.shape[1], device=x.device)
