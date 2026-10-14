@@ -23,6 +23,10 @@ Everything runs on your own PC. No audio is ever uploaded.
 - **Full difficulty ladder.** Expert, Hard, Medium, Easy — each reduced the way
   human charters do it, calibrated against an 800-chart library of hand-made
   charts. A 0–6 `diff_guitar` rating is written for the song list.
+- **A 6-fret part too.** The same song also gets a Guitar Hero Live chart
+  for 6-fret controllers (three white and three black buttons), Expert to
+  Easy. A model trained on the 562 official Guitar Hero Live and GHTV charts
+  picks the buttons; the timing is the 5-fret chart's.
 - **The details that make a chart feel charted.** Sustains from real note
   lengths, HOPOs, star power phrases, numbered practice sections, tap notes
   on synth and piano parts, solo markers where a lead break is found, and
@@ -36,7 +40,7 @@ Everything runs on your own PC. No audio is ever uploaded.
   device you're on — from the couch, or from anywhere with a free Cloudflare
   Tunnel in front.
 
-Guitar (5-fret) only. Songs must be at least 30 seconds.
+Guitar only (5-fret and 6-fret). Songs must be at least 30 seconds.
 
 ## Install (Linux)
 
@@ -72,8 +76,8 @@ Clone Hero.
 
 Options worth knowing: *Max difficulty* caps how hard Expert gets; *Note
 grid* switches between 16ths (default), 8ths (sparser) and triplets; the
-toggles turn sustains, star power, sections, HOPOs, lyrics, solos, open notes
-and taps on or off. Everything defaults to on.
+toggles turn sustains, star power, sections, HOPOs, lyrics, solos, open notes,
+taps and the 6-fret part on or off. Everything defaults to on.
 
 **Command line**, same pipeline:
 
@@ -101,8 +105,10 @@ internet.
 
 ```
 <Save to>/Artist - Title [chartgen]/
-    notes.chart     all four difficulties, star power, sections, solos, lyrics
-    song.ini        name, artist, charter, length, diff_guitar, preview time
+    notes.chart     5-fret and 6-fret guitar, four difficulties each, star power,
+                    sections, solos, lyrics
+    song.ini        name, artist, charter, length, diff_guitar, diff_guitarghl,
+                    preview time
     song.opus       the audio (mp3/ogg/opus inputs are copied as-is)
     album.png       when available: the file's embedded art or the YouTube thumbnail
 ```

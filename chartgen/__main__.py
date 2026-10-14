@@ -84,6 +84,9 @@ def build_args(argv):
                          "followed-instrument timeline when it is on, else "
                          "from the six-stem keyed-share rule; --no-taps to "
                          "strum everything)")
+    ap.add_argument("--ghl", action=argparse.BooleanOptionalAction, default=True,
+                    help="also write a 6-fret (Guitar Hero Live) part, shaped "
+                         "by a model trained on the official charts; default on")
     ap.add_argument("--no-solos", action="store_true",
                     help="skip solo markers (detected as busy instrumental "
                          "breaks in songs that otherwise have vocals)")

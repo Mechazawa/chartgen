@@ -77,6 +77,7 @@ def base_opts(target: Path) -> Namespace:
         no_sections=not saved.get("sections", True),
         no_sustains=not saved.get("sustains", True),
         lyrics=bool(saved.get("lyrics", True)),
+        ghl=bool(saved.get("ghl", True)),
         target_diff=None, skip_existing=True,
         name=None, artist="Unknown", album="", genre="", year="",
     )

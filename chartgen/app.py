@@ -159,6 +159,10 @@ TIPS = {
              "the rest of the song. Deliberately conservative: most songs "
              "get none (70% of human charts have none either); a marker "
              "that does appear is almost always a real lead break.",
+    "ghl": "Also writes a 6-fret part for Guitar Hero Live controllers "
+           "(three white and three black buttons) in the same song. The "
+           "buttons come from a model trained on the official Guitar Hero "
+           "Live charts; the note timing is the 5-fret chart's.",
     "opens": "The no-fret purple strum: lone notes clearly below the "
              "melody - bass drops, chugs, pedal tones - play as a bare "
              "strum with no button held. 60% of human charts use them as "
@@ -356,10 +360,10 @@ class App:
         self.taps = tk.BooleanVar(value=saved.get("taps_v2", True))
         self.solos = tk.BooleanVar(value=saved.get("solos", True))
         self.opens = tk.BooleanVar(value=saved.get("opens", True))
-        # One row of eight fits only with tight spacing: the labels
-        # measure 618px and the card offers ~700, so 14px gaps clipped the
-        # last toggle's text into an anonymous checkbox.
-        for text, var, key in (
+        self.ghl = tk.BooleanVar(value=saved.get("ghl", True))
+        # Two rows: one row of nine needs ~800px and the card offers ~700,
+        # which clips the last toggles down to anonymous checkboxes.
+        for index, (text, var, key) in enumerate((
                 ("Sustains", self.sustains, "sustains"),
                 ("Star power", self.star_power, "star_power"),
                 ("Sections", self.sections, "sections"),
@@ -367,9 +371,10 @@ class App:
                 ("Lyrics", self.lyrics, "lyrics"),
                 ("Solos", self.solos, "solos"),
                 ("Opens", self.opens, "opens"),
-                ("Taps", self.taps, "taps")):
+                ("Taps", self.taps, "taps"),
+                ("6-fret", self.ghl, "ghl"))):
             box = ttk.Checkbutton(toggles, text=text, variable=var)
-            box.pack(side="left", padx=(0, 8))
+            box.grid(row=index // 5, column=index % 5, sticky="w", padx=(0, 14), pady=(0, 4))
             self._tip(key, box)
 
     def _build_actions(self):
@@ -621,6 +626,7 @@ class App:
             taps=self.taps.get(),
             opens=self.opens.get(),
             no_solos=not self.solos.get(),
+            ghl=self.ghl.get(),
             lyric_source=LYRIC_SOURCES.get(self.lyric_source.get(), "auto"),
             name=meta_name,
             artist=meta_artist or "Unknown",
@@ -823,6 +829,7 @@ class App:
             "taps_v2": self.taps.get(),
             "solos": self.solos.get(),
             "opens": self.opens.get(),
+            "ghl": self.ghl.get(),
         }
 
     def _on_close(self):

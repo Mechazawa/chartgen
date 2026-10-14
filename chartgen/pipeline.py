@@ -416,7 +416,7 @@ def run(opts, progress=print, should_cancel=lambda: False) -> dict:
     return _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
                          audio, duration_s, bp_events=events,
                          followed=followed, timeline_solos=timeline_solos,
-                         prefetch=pre)
+                         prefetch=pre, stem_events=stem_events)
 
 
 def stemsmod_key(audio_path: str):
@@ -437,7 +437,7 @@ def _group(notes):
 
 def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
                   audio, duration_s, bp_events=None, followed=None,
-                  timeline_solos=None, prefetch=None) -> dict:
+                  timeline_solos=None, prefetch=None, stem_events=None) -> dict:
     """Everything downstream of Expert-note production: difficulty target,
     reduction, expression, lyrics, art, rating, writing."""
     res = tempo.resolution
@@ -784,6 +784,24 @@ def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
              f"{len(solo_phrases)} solo(s), HOPOs {'on' if opts.hopos else 'off'}")
     check()
 
+    if getattr(opts, "ghl", True) and bp_events:
+        from . import ghl
+
+        if "guitar" not in (stem_events or {}):
+            from . import prominence
+            from . import stems as stemsmod
+
+            mono = stemsmod.separate(str(audio), progress, backend="sw")
+            stem_events = prominence.transcribe_stems(mono, stemsmod.SR) if mono else {}
+        ghl_tiers = ghl.chart_tiers(tiers["ExpertSingle"], tempo, bp_events, stem_events)
+        if ghl_tiers:
+            tiers |= ghl_tiers
+            progress(f"      6-fret: {len(_group(ghl_tiers['ExpertGHLGuitar']))} Expert "
+                     f"position(s) shaped by the GHL model")
+        else:
+            progress("      6-fret skipped: no trained GHL model in this install")
+    check()
+
     progress("[6/6] writing song folder")
     # YouTube titles carry characters FAT and exFAT forbid in folder names
     # (measured in the wild: Baldur's Gate 3 - "I Want To Live"). Only the
@@ -813,7 +831,8 @@ def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
         preview_ms = int(tempo.beat_to_time(star_power[0][0] / res) * 1000)
     (song_dir / "song.ini").write_text(
         chartio.write_song_ini(meta, int(duration_s * 1000), hopos=opts.hopos,
-                               diff_guitar=tier, preview_start_ms=preview_ms),
+                               diff_guitar=tier, preview_start_ms=preview_ms,
+                               diff_guitarghl=tier if "ExpertGHLGuitar" in tiers else -1),
         encoding="utf-8",
     )
 

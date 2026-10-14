@@ -143,6 +143,55 @@ def test_write_chart_emits_all_tiers_star_power_and_sections():
     assert '= E "section Section 1"' in text
 
 
+def test_write_chart_numbers_ghl_lanes_and_keeps_forcing_off_them():
+    """B3 is lane 5 in memory but N 8 in .chart, where 5 means forced."""
+    tiers = {"ExpertSingle": [(480, 0, 0)],
+             "ExpertGHLGuitar": [(480, 5, 0), (960, 7, 0), (1440, 3, 0)]}
+    text = write_chart(tiers, steady(), {"name": "T", "artist": "A", "charter": "c"},
+                       "song.ogg", forced={480})
+    block = text.split("[ExpertGHLGuitar]")[1].split("}")[0]
+    assert "480 = N 8 0" in block and "960 = N 7 0" in block and "1440 = N 3 0" in block
+    assert "= N 5 " not in block, "6-fret block must not carry 5-fret forcing"
+    assert "480 = N 5 0" in text.split("[ExpertSingle]")[1].split("}")[0]
+
+
+def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
+    """Lower tiers only drop Expert positions, and no tier emits a shape the
+    official charts never use there (Easy is white-row only)."""
+    import tempfile
+
+    import torch
+
+    from chartgen import ghl
+
+    torch.manual_seed(0)
+    white = [1, 2, 4, 3, 6]
+    allowed = {"Expert": list(range(64)), "Hard": list(range(64)),
+               "Medium": [c for c in range(64) if c.bit_count() <= 2], "Easy": white}
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "ghl_model.pt"
+        torch.save({"shape": ghl.ShapeNet().state_dict(), "reduce": ghl.ReduceNet().state_dict(),
+                    "allowed": allowed}, path)
+        saved_path, ghl.MODEL_PATH = ghl.MODEL_PATH, path
+        ghl._MODELS.clear()
+        try:
+            expert = [(tick * RESOLUTION // 2, tick % 5, 0) for tick in range(300)]
+            events = [(0.5 + i * 0.25, 0.7 + i * 0.25, 40 + i % 24, 0.8) for i in range(300)]
+            out = ghl.chart_tiers(expert, steady(n=200), events, {"guitar": events})
+        finally:
+            ghl.MODEL_PATH = saved_path
+            ghl._MODELS.clear()
+    expert_ticks = {t for t, _, _ in out["ExpertGHLGuitar"]}
+    assert expert_ticks == {t for t, _, _ in expert}
+    for tier in ("Hard", "Medium", "Easy"):
+        assert {t for t, _, _ in out[f"{tier}GHLGuitar"]} <= expert_ticks, tier
+    assert {lane for _, lane, _ in out["EasyGHLGuitar"]} <= {0, 1, 2}
+    medium_sizes = {}
+    for tick, _, _ in out["MediumGHLGuitar"]:
+        medium_sizes[tick] = medium_sizes.get(tick, 0) + 1
+    assert max(medium_sizes.values(), default=0) <= 2
+
+
 def test_write_chart_merges_lyrics_into_events_in_tick_order():
     t = steady()
     text = write_chart(

@@ -5,13 +5,18 @@ from pathlib import Path
 from .tempo import TempoMap
 
 TIERS = ("ExpertSingle", "HardSingle", "MediumSingle", "EasySingle")
+GHL_TIERS = ("ExpertGHLGuitar", "HardGHLGuitar", "MediumGHLGuitar", "EasyGHLGuitar")
+# 6-fret lanes are W1 W2 W3 B1 B2 B3 = 0-5, but .chart numbers B3 as 8
+# because 5 and 6 were already the forced and tap flags.
+GHL_NOTE = {5: 8}
 
 Note = tuple[int, int, int]  # (tick, lane, sustain_ticks); lane 7 is an open note
 
 
 def _tier_block(name: str, notes: list[Note], star_power: list[tuple[int, int]],
                 solos: list[tuple[int, int]] = (), taps: set[int] = frozenset(),
-                forced: set[int] = frozenset()) -> str:
+                forced: set[int] = frozenset(),
+                note_numbers: dict[int, int] | None = None) -> str:
     """One difficulty track. Star power, solos and tap markers are per-track
     in .chart, so they repeat in every block.
 
@@ -26,7 +31,8 @@ def _tier_block(name: str, notes: list[Note], star_power: list[tuple[int, int]],
     for the Expert tier they were computed against.
     """
     ticks = {t for t, _, _ in notes}
-    lines = [(t, 0, f"  {t} = N {lane} {sus}") for t, lane, sus in notes]
+    numbers = note_numbers or {}
+    lines = [(t, 0, f"  {t} = N {numbers.get(lane, lane)} {sus}") for t, lane, sus in notes]
     lines += [(t, 0, f"  {t} = N 6 0") for t in taps if t in ticks]
     lines += [(t, 0, f"  {t} = N 5 0") for t in forced if t in ticks]
     lines += [
@@ -85,8 +91,9 @@ def write_chart(
     )
     blocks = "\n".join(
         _tier_block(name, tiers[name], list(star_power), list(solos), set(taps),
-                    set(forced) if name == "ExpertSingle" else frozenset())
-        for name in TIERS if tiers.get(name)
+                    set(forced) if name == "ExpertSingle" else frozenset(),
+                    GHL_NOTE if name in GHL_TIERS else None)
+        for name in TIERS + GHL_TIERS if tiers.get(name)
     )
 
     return f"""[Song]
@@ -116,7 +123,8 @@ def write_chart(
 
 
 def write_song_ini(meta: dict, length_ms: int, hopos: bool = False,
-                   diff_guitar: int = -1, preview_start_ms: int = 0) -> str:
+                   diff_guitar: int = -1, preview_start_ms: int = 0,
+                   diff_guitarghl: int = -1) -> str:
     """song.ini so Clone Hero shows real metadata instead of the filename.
 
     diff_guitar is the 0-6 tier badge CH shows in the song list (Rock Band's
@@ -139,6 +147,7 @@ year = {meta.get('year', '')}
 charter = {meta['charter']}
 song_length = {length_ms}
 diff_guitar = {diff_guitar}
+diff_guitarghl = {diff_guitarghl}
 diff_band = {diff_guitar}
 delay = 0
 preview_start_time = {preview_start_ms}
