@@ -13,6 +13,10 @@ import librosa
 import numpy as np
 
 RESOLUTION = 480  # ticks per beat; divisible by 4 (16ths) and 3 (triplets)
+# librosa's beat tracker reports each beat after the transient: 19-37 ms on
+# click tracks, more with more noise. On the official Guitar Hero Live songs
+# the notes sit a median 29 ms before the raw grid.
+BEAT_LAG_S = 0.03
 
 
 @dataclass
@@ -179,7 +183,8 @@ def detect(y, sr, resolution: int = RESOLUTION, bpm_mult: str = "auto") -> Tempo
     prefers the conventional 70-165 range rather than trusting the detector.
     """
     _, beats = librosa.beat.beat_track(y=y, sr=sr, units="time")
-    beats = np.asarray(beats, dtype=float)
+    beats = np.asarray(beats, dtype=float) - BEAT_LAG_S
+    beats = beats[beats >= 0]
     if len(beats) < 2:
         raise ValueError("could not detect a beat grid in this audio")
 
