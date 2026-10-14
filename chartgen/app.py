@@ -12,18 +12,17 @@ import json
 import os
 import queue
 import subprocess
-import sys
 import threading
 import time
 import tkinter as tk
-import tkinter.font as tkfont
 from argparse import Namespace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import pipeline
 
-SETTINGS = Path(os.environ.get("APPDATA", Path.home())) / "chartgen" / "settings.json"
+SETTINGS = (Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+            / "chartgen" / "settings.json")
 GRIDS = {"16th notes (default)": 4, "8th notes (sparser)": 2, "Triplet 8ths": 3}
 # Transcribing vocals invents words over instrumental outros - Whisper falls
 # back on the YouTube captions it was trained on, and a real chart ended with
@@ -78,32 +77,7 @@ def apply_theme(root: tk.Tk) -> None:
         MUTED = "#9aa0a6"
         LOG_BG, LOG_FG = "#161616", "#d6d6d6"
     except Exception:
-        try:
-            ttk.Style().theme_use("vista")
-        except tk.TclError:
-            pass
-
-
-def dark_title_bar(root: "tk.Tk | tk.Toplevel") -> None:
-    """Ask DWM to paint the title bar dark so it matches the window."""
-    if not DARK or sys.platform != "win32":
-        return
-    try:
-        from ctypes import byref, c_int, sizeof, windll
-
-        root.update_idletasks()
-        hwnd = windll.user32.GetParent(root.winfo_id())
-        # 20 is DWMWA_USE_IMMERSIVE_DARK_MODE; pre-20H1 builds used 19.
-        for attr in (20, 19):
-            if windll.dwmapi.DwmSetWindowAttribute(
-                    hwnd, attr, byref(c_int(1)), sizeof(c_int)) == 0:
-                break
-        # Nudge the non-client area to repaint, else the bar stays light
-        # until the window is moved.
-        root.withdraw()
-        root.deiconify()
-    except Exception:
-        pass
+        ttk.Style().theme_use("clam")
 
 
 class Tooltip:
@@ -142,7 +116,7 @@ class Tooltip:
         bg, fg = ("#2a2a2a", "#e8e8e8") if DARK else ("#ffffe1", "#222222")
         tk.Label(self.tip, text=self.text, justify="left", wraplength=self.WRAP_PX,
                  background=bg, foreground=fg, relief="solid", borderwidth=1,
-                 font=("Segoe UI", 9), padx=8, pady=6).pack()
+                 font=("sans-serif", 9), padx=8, pady=6).pack()
 
     def _hide(self, _event=None):
         self._cancel()
@@ -245,7 +219,7 @@ class App:
 
     def _section(self, text: str, row: int):
         ttk.Label(self.root, text=text.upper(), foreground=MUTED,
-                  font=("Segoe UI", 8, "bold")).grid(
+                  font=("sans-serif", 8, "bold")).grid(
             row=row, column=0, sticky="w", padx=22, pady=(14, 4))
 
     def _card(self, row: int, expand=False) -> ttk.Frame:
@@ -263,9 +237,9 @@ class App:
             logo.create_rectangle(x, 26 - height, x + 5, 26, fill=color, width=0)
         logo.pack(side="left", padx=(0, 10))
         ttk.Label(head, text="chartgen",
-                  font=("Segoe UI Semibold", 15)).pack(side="left")
+                  font=("sans-serif", 15, "bold")).pack(side="left")
         ttk.Label(head, text="Clone Hero chart generator", foreground=MUTED,
-                  font=("Segoe UI", 10)).pack(side="left", padx=(10, 0), pady=(4, 0))
+                  font=("sans-serif", 10)).pack(side="left", padx=(10, 0), pady=(4, 0))
 
     def _build_input(self, saved):
         frame = self._card(row=2)
@@ -302,7 +276,7 @@ class App:
         self.queue_box = tk.Listbox(
             self.queue_frame, height=4, activestyle="none", relief="flat",
             selectmode="extended", bg=LOG_BG, fg=LOG_FG,
-            highlightthickness=0, font=("Segoe UI", 9))
+            highlightthickness=0, font=("sans-serif", 9))
         self.queue_box.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(self.queue_frame, orient="vertical",
                                command=self.queue_box.yview)
@@ -419,9 +393,7 @@ class App:
         frame.configure(padding=6)
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        mono = ("Cascadia Mono" if "Cascadia Mono" in tkfont.families()
-                else "Consolas")
-        self.log = tk.Text(frame, height=6, wrap="none", font=(mono, 9),
+        self.log = tk.Text(frame, height=6, wrap="none", font=("monospace", 9),
                            bg=LOG_BG, fg=LOG_FG, insertbackground=LOG_FG,
                            relief="flat", borderwidth=0, padx=10, pady=8,
                            selectbackground="#2f4f77" if DARK else "#cce4ff")
@@ -600,7 +572,6 @@ class App:
         x = self.root.winfo_rootx() + (self.root.winfo_width()
                                        - win.winfo_reqwidth()) // 2
         win.geometry(f"+{max(x, 0)}+{self.root.winfo_rooty() + 160}")
-        dark_title_bar(win)
         win.grab_set()
         artist_entry.focus_set()
         self.root.wait_window(win)
@@ -839,10 +810,7 @@ class App:
     def _open_folder(self):
         if self.result:
             path = str(self.result["song_dir"])
-            if sys.platform == "win32":
-                os.startfile(path)  # noqa: S606
-            else:
-                subprocess.Popen(["xdg-open" if sys.platform != "darwin" else "open", path])
+            subprocess.Popen(["xdg-open", path])
 
     def _settings(self) -> dict:
         return {
@@ -869,19 +837,9 @@ class App:
 
 
 def main():
-    if sys.platform == "win32":
-        # Without this Tk renders at 96 DPI and Windows stretches the bitmap,
-        # which is the classic blurry-Tkinter look on scaled displays.
-        try:
-            from ctypes import windll
-
-            windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
     root = tk.Tk()
     apply_theme(root)
     App(root)
-    dark_title_bar(root)
     root.mainloop()
 
 

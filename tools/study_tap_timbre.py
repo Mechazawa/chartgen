@@ -15,7 +15,7 @@ mix speak the same units. Tick-to-time comes from the chart's own
 SyncTrack, not from our beat detector, so timing error does not blur the
 comparison.
 
-    python tools/study_tap_timbre.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/study_tap_timbre.py ~/.clonehero/Songs
 """
 import argparse
 import re

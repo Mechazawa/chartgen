@@ -5,7 +5,7 @@ verse 1. Before building that, check it. Human charts name their practice
 sections, so instances of the same name (chorus, chorus 2, ...) can be
 compared note-for-note, with differently-named sections as the control.
 
-    python tools/study_structure.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/study_structure.py ~/.clonehero/Songs
 """
 import argparse
 import re

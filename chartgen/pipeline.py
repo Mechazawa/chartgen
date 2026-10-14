@@ -59,7 +59,7 @@ class _Prefetch:
 
 
 def _folder_name(artist: str, name: str) -> str:
-    """Song folder name: Windows-illegal characters stripped, never empty."""
+    """Song folder name: characters FAT and exFAT drives reject are stripped, never empty."""
     import re
 
     return re.sub(r'[<>:"/\\|?*]', "", f"{artist} - {name}").strip(" -.") or "song"
@@ -75,10 +75,7 @@ def _display_name(opts, audio: Path) -> str:
 def stage_audio(src: Path, dest_dir: Path) -> str:
     """Put playable audio in the song folder under the reserved name `song.*`.
 
-    Transcodes to Opus rather than Vorbis. Vorbis would be the obvious choice,
-    but libsndfile 1.2.2 on Windows hard-crashes encoding it (0xC00000FD stack
-    overflow, for float64, float32 and int16 alike) — a native crash that cannot
-    even be caught. Opus encodes fine and the .chart docs recommend it anyway.
+    Transcodes to Opus, which the .chart docs recommend.
     """
     if src.suffix.lower() in PLAYABLE_AUDIO:
         shutil.copy2(src, dest_dir / f"song{src.suffix.lower()}")
@@ -788,7 +785,7 @@ def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
     check()
 
     progress("[6/6] writing song folder")
-    # YouTube titles carry characters Windows forbids in folder names
+    # YouTube titles carry characters FAT and exFAT forbid in folder names
     # (measured in the wild: Baldur's Gate 3 - "I Want To Live"). Only the
     # folder is sanitised; song.ini keeps the original text.
     song_dir = Path(opts.outdir) / _folder_name(opts.artist, name)

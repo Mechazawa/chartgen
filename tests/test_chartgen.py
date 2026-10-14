@@ -567,7 +567,7 @@ def test_youtube_url_detection_and_title_parsing():
                 "https://music.youtube.com/watch?v=abc123",
                 "http://m.youtube.com/watch?v=abc123"):
         assert is_youtube_url(url), url
-    for not_url in (r"C:\songs\track.mp3", "song.opus",
+    for not_url in ("/music/track.mp3", "song.opus",
                     "https://vimeo.com/123", "youtube song name"):
         assert not is_youtube_url(not_url), not_url
 
@@ -625,9 +625,9 @@ def test_folder_name_helper_and_skip_check_agree():
     assert _folder_name("Alan Walker", "Faded [chartgen]") == "Alan Walker - Faded [chartgen]"
 
 
-def test_song_folder_names_survive_windows_illegal_characters():
+def test_song_folder_names_survive_reserved_characters():
     """A real YouTube title ('Baldur's Gate 3 - "I Want To Live"') crashed
-    folder creation: quotes and friends are illegal in Windows paths. The
+    folder creation: quotes and friends are illegal on FAT and exFAT drives. The
     folder is sanitised; metadata keeps the original text."""
     import re
 
@@ -649,10 +649,10 @@ def test_playlist_url_detection_is_strict():
     assert is_playlist_url("https://music.youtube.com/playlist?list=PLx123")
     assert not is_playlist_url("https://www.youtube.com/watch?v=abc&list=PLx123")
     assert not is_playlist_url("https://youtu.be/abc123")
-    assert not is_playlist_url(r"C:\songs\track.mp3")
+    assert not is_playlist_url("/music/track.mp3")
 
     # Non-playlist inputs pass through expand_inputs untouched, in order.
-    items = [r"C:\a.mp3", "https://youtu.be/abc", r"C:\b.flac"]
+    items = ["/music/a.mp3", "https://youtu.be/abc", "/music/b.flac"]
     assert expand_inputs(items) == items
 
 

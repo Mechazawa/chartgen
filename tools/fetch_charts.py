@@ -165,7 +165,7 @@ def main(argv=None):
     ap.add_argument("-o", "--outdir", type=Path, default=Path("data/calibration"))
     ap.add_argument("-n", "--count", type=int, default=400)
     ap.add_argument("--library", type=Path,
-                    default=Path.home() / "Documents/Clone Hero/Songs",
+                    default=Path.home() / ".clonehero/Songs",
                     help="skip songs already in this library")
     ap.add_argument("--start-page", type=int, default=1)
     ap.add_argument("--genre-cap", type=int, default=None,

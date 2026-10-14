@@ -5,7 +5,7 @@ folder's audio if it survived (copied-through mp3/ogg keep tags; transcoded
 opus does not), else a YouTube search for "<artist> <name>" and that video's
 thumbnail.
 
-    python tools/add_art.py "C:/.../Clone Hero/Songs" --match chartgen
+    python tools/add_art.py ~/.clonehero/Songs --match chartgen
 """
 import argparse
 import configparser

@@ -7,7 +7,6 @@ For a few isolated guitar stems: transcribe as-is and with 50 / 130 ms of
 leading silence, undo the offset, and compare onset sets at 20 ms tolerance.
 Also compare pitch sets of matched onsets.
 """
-import os
 import sys
 import warnings
 from pathlib import Path
@@ -20,7 +19,7 @@ warnings.filterwarnings("ignore")
 import logging
 logging.getLogger().setLevel(logging.ERROR)
 
-SONGS = Path(os.path.expandvars(r"%USERPROFILE%\Documents\Clone Hero\Songs"))
+SONGS = Path.home() / ".clonehero/Songs"
 SCRATCH = Path(__file__).resolve().parent
 from basic_pitch import ICASSP_2022_MODEL_PATH  # noqa: E402
 from basic_pitch.inference import Model, run_inference  # noqa: E402

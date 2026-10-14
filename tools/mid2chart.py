@@ -10,7 +10,7 @@ training discretization discards them anyway.
 Library use: `chart_text = convert(Path("notes.mid"))`.
 CLI (writes <out>/<song folder name>.chart, never touches the song folders):
 
-    python tools/mid2chart.py --root "C:/Users/ernes/Documents/Clone Hero/Songs" --out data/converted
+    python tools/mid2chart.py --root ~/.clonehero/Songs --out data/converted
 """
 import argparse
 import sys

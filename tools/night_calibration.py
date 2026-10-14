@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PYTHON = ROOT / ".venv/Scripts/python.exe"
+PYTHON = ROOT / ".venv/bin/python"
 TOOLS = ROOT / "tools"
 CAL = ROOT / "data/calibration"
 WORK = ROOT / "work"

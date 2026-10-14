@@ -6,7 +6,7 @@ what each chart's lyrics do in its final stretch - where they stop relative
 to the last note, how big the last gap is, and whether the closing phrases
 repeat themselves (the signature of a Whisper hallucination loop).
 
-    python tools/audit_lyrics.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/audit_lyrics.py ~/.clonehero/Songs
 """
 import argparse
 import re

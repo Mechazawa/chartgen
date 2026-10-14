@@ -4,7 +4,7 @@ walk_score's thresholds were reasoned, not calibrated (its docstring says so).
 This runs variety/walk/step profiles over every ExpertSingle in a Clone Hero
 library, so the gate can be judged against charts humans actually enjoy:
 
-    python tools/calibrate_quality.py --root "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/calibrate_quality.py --root ~/.clonehero/Songs
 
 If real charts routinely fail the gate, the gate is wrong, not the charts.
 """

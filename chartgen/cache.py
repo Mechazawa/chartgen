@@ -9,7 +9,7 @@ recomputing what would come out the same. Stems are stored as float32,
 exactly as the separator produced them: float16 or FLAC would quantise the
 values and that WOULD change downstream transcriptions.
 
-Layout under CHARTGEN_CACHE_DIR (default %APPDATA%/chartgen/cache):
+Layout under CHARTGEN_CACHE_DIR (default $XDG_CACHE_HOME/chartgen/cache):
     stems/<key>.npz            raw separator outputs, one mono float32 per stem
     transcriptions/<key>.json  [(start, end, pitch, amplitude), ...]
 
@@ -30,7 +30,7 @@ def cache_dir() -> Path:
     override = os.environ.get("CHARTGEN_CACHE_DIR")
     if override:
         return Path(override)
-    return Path(os.environ.get("APPDATA", Path.home())) / "chartgen" / "cache"
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "chartgen" / "cache"
 
 
 def enabled() -> bool:

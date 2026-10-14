@@ -6,7 +6,7 @@ LRCLIB publishes community LRC files keyed by artist/title/duration, which
 gives one: how many words the song really has, when its singing really
 starts and stops, and therefore whether we stopped early or invented a tail.
 
-    python tools/compare_lyrics.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/compare_lyrics.py ~/.clonehero/Songs
 """
 import argparse
 import configparser

@@ -4,7 +4,7 @@ A gate is only meaningful if human charts pass it. This replays every chart's
 own SyncTrack so the simulator sees real seconds, then reports what fraction
 of note-to-note transitions demand more of the hands than the chart allows.
 
-    python tools/study_playability.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/study_playability.py ~/.clonehero/Songs
 """
 import argparse
 import re

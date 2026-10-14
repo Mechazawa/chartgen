@@ -5,7 +5,6 @@ octave higher and twice as fast, transcribe, then map times x2 and pitch -12.
 Also try 0.5x (octave down, twice as slow) for completeness.
 Compare human-chart coverage on the real guitar stem against the normal pass.
 """
-import os
 import sys
 import warnings
 from pathlib import Path
@@ -17,8 +16,8 @@ warnings.filterwarnings("ignore")
 import logging
 logging.getLogger().setLevel(logging.ERROR)
 
-ROOT = Path(r"C:\Users\ernes\Desktop\chartgen-transfer")
-SONGS = Path(os.path.expandvars(r"%USERPROFILE%\Documents\Clone Hero\Songs"))
+ROOT = Path(__file__).resolve().parents[2]
+SONGS = Path.home() / ".clonehero/Songs"
 SCRATCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "tools"))
 from evaluate import chart_note_times  # noqa: E402

@@ -6,7 +6,7 @@ does not say what to replace it with. This compares the gaps that DO carry a
 solo against the ones that do not, on every feature a chart alone can see, so
 the replacement rule is chosen from evidence rather than intuition.
 
-    python tools/study_solo_gaps.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/study_solo_gaps.py ~/.clonehero/Songs
 """
 import argparse
 import statistics

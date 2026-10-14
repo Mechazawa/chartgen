@@ -14,7 +14,6 @@ plus two ceilings: raw onset-posteriorgram peaks (any pitch, >=0.1) and
 librosa spectral-flux onsets on the same audio.
 """
 import json
-import os
 import sys
 import time
 import warnings
@@ -28,8 +27,8 @@ warnings.filterwarnings("ignore")
 import logging
 logging.getLogger().setLevel(logging.ERROR)
 
-ROOT = Path(r"C:\Users\ernes\Desktop\chartgen-transfer")
-SONGS = Path(os.path.expandvars(r"%USERPROFILE%\Documents\Clone Hero\Songs"))
+ROOT = Path(__file__).resolve().parents[2]
+SONGS = Path.home() / ".clonehero/Songs"
 CONVERTED = ROOT / "data" / "converted"
 SCRATCH = Path(__file__).resolve().parent
 OUT = ROOT / "out" / "bp_research" / "bp_sweep.jsonl"

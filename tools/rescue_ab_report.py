@@ -33,7 +33,7 @@ from chartgen.tempo import TempoMap  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "work" / "keyed_cache"
 PROM = ROOT / "out" / "prom"
-CH = Path("C:/Users/ernes/Documents/Clone Hero/Songs")
+CH = Path.home() / ".clonehero/Songs"
 SONGS = [
     ("Perturbator - Sexualizer", "Perturbator - Sexualizer PROM [chartgen]",
      "Perturbator - Sexualizer OLDRESCUE [chartgen]", "Perturbator - Sexualizer HUMAN"),

@@ -8,7 +8,7 @@ often taps appear in a real library, at which difficulties, on chords or
 singles, and — the number that would actually drive a rule — how fast the
 passages carrying them are compared with the rest of the chart.
 
-    python tools/study_taps.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/study_taps.py ~/.clonehero/Songs
 """
 import argparse
 import re

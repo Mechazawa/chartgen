@@ -108,7 +108,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     groups = {"HUMAN": [], "chartgen": []}
-    roots = [args.library, Path.home() / "Documents/Clone Hero/Songs"]
+    roots = [args.library, Path.home() / ".clonehero/Songs"]
     seen = set()
     for root in roots:
         for chart in sorted(root.rglob("*.chart")):

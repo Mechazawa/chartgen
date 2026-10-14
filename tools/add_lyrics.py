@@ -5,7 +5,7 @@ Transcribes each song folder's audio and splices phrase/lyric events into the
 seconds->tick mapping (via a TempoMap replayed from the B events). Skips
 folders that already contain lyric events.
 
-    python tools/add_lyrics.py "C:/.../Clone Hero/Songs" --match chartgen
+    python tools/add_lyrics.py ~/.clonehero/Songs --match chartgen
 """
 import argparse
 import re

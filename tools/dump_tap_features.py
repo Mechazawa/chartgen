@@ -6,7 +6,7 @@ per-note detail — which runs of notes the charter tapped and what each note
 sounded like — so the phrase threshold can be swept in seconds instead of
 re-decoding audio per guess.
 
-    python tools/dump_tap_features.py "C:/Users/ernes/Documents/Clone Hero/Songs" -o work/taps_feat.json
+    python tools/dump_tap_features.py ~/.clonehero/Songs -o work/taps_feat.json
 """
 import argparse
 import json

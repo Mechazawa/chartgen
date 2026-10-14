@@ -7,7 +7,7 @@ solo. This feeds the detector the human chart's own notes and our own
 audio-derived sections, so what is being measured is the audio evidence and
 nothing else.
 
-    python tools/validate_solos.py "C:/Users/ernes/Documents/Clone Hero/Songs" --limit 40
+    python tools/validate_solos.py ~/.clonehero/Songs --limit 40
 """
 import argparse
 import random

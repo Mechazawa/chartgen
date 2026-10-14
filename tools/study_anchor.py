@@ -96,7 +96,7 @@ def main(argv=None):
         row = study(chart)
         if row:
             groups["chartgen" if is_generated(b) else "HUMAN"].append(row)
-    extra = Path.home() / "Documents/Clone Hero/Songs"
+    extra = Path.home() / ".clonehero/Songs"
     for chart in sorted(extra.rglob("*.chart")):
         b = blocks(chart.read_text(encoding="utf-8", errors="ignore"))
         if is_generated(b):

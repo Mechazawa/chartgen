@@ -7,7 +7,6 @@ Ensemble A = shifts {0, 43, 86} frames; ensemble B = {21, 64, 107}.
 Single passes: shift 0 vs shift 21.  Agreement A-vs-B measures ensemble
 stability the same way single-0 vs single-21 measures single-pass stability.
 """
-import os
 import sys
 import warnings
 from pathlib import Path
@@ -20,8 +19,8 @@ warnings.filterwarnings("ignore")
 import logging
 logging.getLogger().setLevel(logging.ERROR)
 
-ROOT = Path(r"C:\Users\ernes\Desktop\chartgen-transfer")
-SONGS = Path(os.path.expandvars(r"%USERPROFILE%\Documents\Clone Hero\Songs"))
+ROOT = Path(__file__).resolve().parents[2]
+SONGS = Path.home() / ".clonehero/Songs"
 SCRATCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "tools"))
 from evaluate import chart_note_times  # noqa: E402

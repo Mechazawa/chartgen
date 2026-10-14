@@ -21,7 +21,7 @@ classifier reaches 63% precision from three feature groups: spectral
 baseline, predominant pitch with its confidence, and structural repetition.
 
 That is the shape copied here, minus the SVM (no training data) and minus
-Melodia (Essentia ships no Windows wheels). librosa's pyin gives the pitch
+Melodia (Essentia). librosa's pyin gives the pitch
 track and its voiced probability; the chroma sections the pipeline already
 computes give the repetition feature. Since even a purpose-built classifier
 tops out near 63% precision, this is deliberately biased toward silence: a

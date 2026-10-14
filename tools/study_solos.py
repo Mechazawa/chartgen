@@ -6,7 +6,7 @@ many songs carry solos, how long they run, where they sit, how much busier
 they actually are, and (the number that decides whether our premise holds)
 whether a lyric-free gap is even a useful predictor of a solo.
 
-    python tools/study_solos.py "C:/Users/ernes/Documents/Clone Hero/Songs"
+    python tools/study_solos.py ~/.clonehero/Songs
 """
 import argparse
 import re

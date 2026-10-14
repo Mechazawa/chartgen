@@ -86,8 +86,7 @@ def _sw_model():
     from bs_roformer.inference import SafeLoaderWithTuple
     from ml_collections import ConfigDict
 
-    # The package prints download/progress text to stdout, which is None
-    # under pythonw; keep it quiet and safe.
+    # The package prints download and progress text; keep the app log clean.
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         model_path, config_path = ensure_model_assets(SW_MODEL)
         with open(config_path) as fh:
@@ -212,9 +211,8 @@ def _separate_sw_cli(y, progress) -> dict | None:
             (tmp / "in").mkdir()
             sf.write(str(tmp / "in" / "song.wav"), y.T, SR)
             progress("      separating stems (BS-RoFormer SW, subprocess)")
-            exe = Path(sys.executable).parent / "bs-roformer-infer.exe"
             run = subprocess.run(
-                [str(exe) if exe.is_file() else "bs-roformer-infer",
+                [str(Path(sys.executable).parent / "bs-roformer-infer"),
                  "--input_folder", str(tmp / "in"),
                  "--store_dir", str(tmp / "out")],
                 capture_output=True, text=True, timeout=1800)

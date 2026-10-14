@@ -6,7 +6,7 @@ JSON; sweep_solos.py then tunes rules against the cache in a second, which is
 the only way to choose thresholds on evidence rather than on the first
 plausible guess.
 
-    python tools/dump_solo_features.py "C:/Users/ernes/Documents/Clone Hero/Songs" -o work/solo_features.json
+    python tools/dump_solo_features.py ~/.clonehero/Songs -o work/solo_features.json
 """
 import argparse
 import json
