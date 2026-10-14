@@ -31,10 +31,7 @@ OFFSET_REFINE_S, OFFSET_BIN_S = 0.05, 0.005
 HOLDOUT_SHARE = 0.1
 VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
-# Training crops are transposed by up to this many semitones. Only the
-# absolute pitch rows move; the song-centred rows already ignore the key.
-TRANSPOSE = 3
-ABSOLUTE_ROWS = (len(ghl.STREAMS) + 2) * ghl.PITCHES
+TRANSITION_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
 BUTTON_COUNT = torch.tensor([shape.bit_count() for shape in range(1 << ghl.BUTTONS)])
 # A shape the official charts use fewer times than this on a tier is
 # never emitted there (Easy, for one, is white-row only).
@@ -86,20 +83,12 @@ def song_arrays(record: dict, delay_s: float) -> dict:
             "tier_shapes": tier_shapes, "offset": offset}
 
 
-def crops(songs, rng, batch, transpose=0):
+def crops(songs, rng, batch):
     picks = [songs[rng.randrange(len(songs))] for _ in range(batch)]
     out = []
     for song in picks:
         begin = rng.randrange(max(1, len(song["shapes"]) - ghl.WINDOW + 1))
-        item = {k: v[begin:begin + ghl.WINDOW] for k, v in song.items() if k != "offset"}
-        semitones = rng.randint(-transpose, transpose)
-        if semitones:
-            x = item["x"].astype(np.float32)
-            rows = x[:, :ABSOLUTE_ROWS].reshape(len(x), -1, ghl.PITCHES)
-            x[:, :ABSOLUTE_ROWS] = np.roll(rows, semitones, axis=2).reshape(len(x), -1)
-            x[:, -1] += semitones / 12.0  # the song-centre scalar
-            item["x"] = x
-        out.append(item)
+        out.append({k: v[begin:begin + ghl.WINDOW] for k, v in song.items() if k != "offset"})
     return out
 
 
@@ -130,7 +119,7 @@ def train(model, songs, val_songs, steps, batch, lr, device, loss_of, board, tag
     for step in range(1, steps + 1):
         model.train()
         with torch.autocast(device, dtype=torch.bfloat16):
-            loss, _ = loss_of(model, crops(songs, rng, batch, TRANSPOSE))
+            loss, _ = loss_of(model, crops(songs, rng, batch))
         opt.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -197,6 +186,38 @@ def reduce_loss(device):
     return loss_of
 
 
+def transitions(songs) -> np.ndarray:
+    """[64, 64] log P(next shape | shape) over the songs' Expert charts,
+    add-one smoothed."""
+    counts = np.ones((1 << ghl.BUTTONS, 1 << ghl.BUTTONS))
+    for song in songs:
+        np.add.at(counts, (song["shapes"][:-1], song["shapes"][1:]), 1)
+    return np.log(counts / counts.sum(1, keepdims=True))
+
+
+def structure_score(pred: np.ndarray, truth: np.ndarray) -> np.ndarray:
+    """[exact, size, row, move hits, fretted pairs] of a predicted sequence."""
+    ours, theirs = structure(pred), structure(truth)
+    both = ~np.isnan(ours[2]) & ~np.isnan(theirs[2])
+    return np.array([(pred == truth).sum(), (ours[0] == theirs[0]).sum(), (ours[1] == theirs[1]).sum(),
+                     (ours[2] == theirs[2])[both].sum(), both.sum()])
+
+
+def pick_weight(shape_net, songs, device, allowed, moves) -> float:
+    """The transition weight with the best mean of size, row and move
+    agreement on the validation songs."""
+    logits = [ghl.windowed(shape_net, s["x"].astype(np.float32), device) for s in songs]
+    total = sum(len(s["shapes"]) for s in songs)
+    best = (-1.0, 0.0)
+    for weight in TRANSITION_WEIGHTS:
+        hits = sum(structure_score(ghl.viterbi(lg, moves, allowed, weight), s["shapes"])
+                   for lg, s in zip(logits, songs, strict=True))
+        score = (hits[1] / total + hits[2] / total + hits[3] / max(hits[4], 1)) / 3
+        print(f"  transition weight {weight}: validation score {score:.1%}", flush=True)
+        best = max(best, (score, weight))
+    return best[1]
+
+
 def allowed_shapes(songs) -> dict[str, list[int]]:
     expert = np.concatenate([s["shapes"] for s in songs])
     out = {"Expert": expert}
@@ -206,16 +227,26 @@ def allowed_shapes(songs) -> dict[str, list[int]]:
                    if n >= MIN_SHAPE_USES] for tier, shapes in out.items()}
 
 
-def evaluate(shape_net, reduce_net, songs, device):
+def structure(shapes: np.ndarray):
+    """Per position: buttons held (3 for any triple), row (0 white, 1 black,
+    2 both, 3 open) and the column move into the next note (-1, 0, 1, or
+    nan next to an open)."""
+    lanes = [[b for b in range(ghl.BUTTONS) if s >> b & 1] for s in shapes]
+    row = np.array([3 if not ls else 0 if max(ls) < 3 else 1 if min(ls) >= 3 else 2 for ls in lanes])
+    column = np.array([np.mean([b % 3 for b in ls]) if ls else np.nan for ls in lanes])
+    return np.minimum(np.bitwise_count(shapes), 3), row, np.sign(np.diff(column, append=np.nan))
+
+
+def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weight, board) -> None:
     shape_net.eval()
     reduce_net.eval()
-    exact = size = total = 0
+    hits = np.zeros(5)  # exact, size, row, move, fretted pairs
+    total = 0
     tier_stats = np.zeros((len(ghl.TIERS), 4))  # tp, fp, fn, same shape among tp
     for song in songs:
         x = song["x"].astype(np.float32)
-        pred = ghl.windowed(shape_net, x, device).argmax(-1)
-        exact += (pred == song["shapes"]).sum()
-        size += (np.bitwise_count(pred) == np.bitwise_count(song["shapes"])).sum()
+        pred = ghl.viterbi(ghl.windowed(shape_net, x, device), moves, allowed["Expert"], weight)
+        hits += structure_score(pred, song["shapes"])
         total += len(pred)
         out = ghl.windowed(reduce_net, reduce_x(song, song["shapes"]), device)
         kept = out[..., 0] > 0
@@ -225,11 +256,16 @@ def evaluate(shape_net, reduce_net, songs, device):
         tier_stats[:, 1] += (kept & ~truth).sum(0)
         tier_stats[:, 2] += (~kept & truth).sum(0)
         tier_stats[:, 3] += ((tier_pred == song["tier_shapes"]) & kept & truth).sum(0)
-    print(f"Expert shape: exact {exact / total:.1%}, chord size {size / total:.1%}")
+    scores = {"expert_exact": hits[0] / total, "expert_size": hits[1] / total,
+              "expert_row": hits[2] / total, "expert_move": hits[3] / max(hits[4], 1)}
     for k, tier in enumerate(ghl.TIERS):
         tp, fp, fn, same = tier_stats[k]
-        print(f"{tier}: keep precision {tp / (tp + fp):.1%} recall {tp / (tp + fn):.1%}, "
-              f"shape {same / tp:.1%} (from true Expert shapes)")
+        scores |= {f"{tier}_keep_precision": tp / max(tp + fp, 1),
+                   f"{tier}_keep_recall": tp / max(tp + fn, 1), f"{tier}_shape": same / max(tp, 1)}
+    for name, value in scores.items():
+        print(f"holdout {name}: {value:.1%}")
+        board.add_scalar(f"holdout/{name}", value)
+    board.flush()
 
 
 def main(argv=None):
@@ -270,10 +306,15 @@ def main(argv=None):
     print("training ReduceNet", flush=True)
     train(reduce_net, train_songs, val_songs, args.steps // 2, args.batch, args.lr, device,
           reduce_loss(device), board, "reduce")
-    evaluate(shape_net, reduce_net, test_songs, device)
+    allowed = allowed_shapes(train_songs)
+    moves = transitions(train_songs)
+    weight = pick_weight(shape_net, val_songs, device, allowed["Expert"], moves)
+    board.add_scalar("holdout/transition_weight", weight)
+    evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weight, board)
     torch.save({"shape": {k: v.half() for k, v in shape_net.state_dict().items()},
                 "reduce": {k: v.half() for k, v in reduce_net.state_dict().items()},
-                "allowed": allowed_shapes(train_songs), "holdout": sorted(holdout)}, args.out)
+                "allowed": allowed, "transitions": torch.from_numpy(moves), "transition_weight": weight,
+                "holdout": sorted(holdout)}, args.out)
     print(f"wrote {args.out}")
     return 0
 

@@ -22,8 +22,11 @@ MODEL_PATH = Path(__file__).with_name("ghl_model.pt")
 LOW_MIDI, PITCHES = 21, 88
 STREAMS = ("mix", "guitar", "bass", "piano", "sw_other", "vocals")
 ONSET_BEFORE_S, ONSET_AFTER_S = 0.05, 0.08
+HEARD = 0.2  # amplitude above which a pitch counts as played
+ROWS = len(STREAMS) + 2  # onsets per stream, then held mix and guitar pitches
+STATS = 5
 SCALARS = 6
-N_FEATURES = (len(STREAMS) + 4) * PITCHES + SCALARS
+N_FEATURES = 3 * ROWS * STATS + SCALARS
 WINDOW = 256
 
 
@@ -53,32 +56,49 @@ def _pitch_rows(events, times: np.ndarray, sounding: bool) -> np.ndarray:
     return out
 
 
+def _stats(rows: np.ndarray, centre: int) -> np.ndarray:
+    """[N, STATS]: how many pitches sound, the loudest amplitude, the top
+    and bottom pitch in octaves from the song's centre, and their span."""
+    heard = rows > HEARD
+    has = heard.any(1)
+    index = np.arange(PITCHES)[None, :]
+    top = np.where(heard, index, -1).max(1)
+    low = np.where(heard, index, PITCHES).min(1)
+    return np.stack([heard.sum(1), rows.max(1), np.where(has, top - centre, 0) / 12,
+                     np.where(has, low - centre, 0) / 12, np.where(has, top - low, 0) / 12], 1)
+
+
 def features(times: np.ndarray, beat_phase: np.ndarray, sustain_s: np.ndarray,
              mix_events, stem_events: dict) -> np.ndarray:
-    """[N, N_FEATURES] per chart position: onset pitches per stream, held
-    guitar and mix pitches, the guitar and mix onsets again shifted to the
-    song's own pitch centre, and timing scalars."""
+    """[N, N_FEATURES] per chart position: pitch statistics of each stream's
+    onsets and of the held mix and guitar notes, their change from the
+    previous position and into the next, and timing scalars. Pitches are
+    relative to the song's centre, so the key does not matter."""
     streams = {"mix": mix_events} | {k: v for k, v in stem_events.items() if k in STREAMS}
-    onsets = [_pitch_rows(streams.get(name) or [], times, False) for name in STREAMS]
-    held = [_pitch_rows(streams.get(name) or [], times, True) for name in ("mix", "guitar")]
     centre_events = streams.get("guitar") or mix_events or [(0, 0, 60, 0)]
-    shift = int(np.median([e[2] for e in centre_events])) - 60
-    centred = [np.roll(rows, -shift, axis=1) for rows in onsets[:2]]
+    centre = int(np.median([e[2] for e in centre_events]))
+    rows = [_pitch_rows(streams.get(name) or [], times, False) for name in STREAMS]
+    rows += [_pitch_rows(streams.get(name) or [], times, True) for name in ("mix", "guitar")]
+    stats = np.hstack([_stats(r, centre - LOW_MIDI) for r in rows])
+    before = np.vstack([np.zeros_like(stats[:1]), stats[:-1]])
+    after = np.vstack([stats[1:], np.zeros_like(stats[:1])])
+    shift = centre - 60
 
     gap_prev = np.diff(times, prepend=times[0] - 4.0) if len(times) else times
     gap_next = np.diff(times, append=times[-1] + 4.0) if len(times) else times
     scalars = np.stack([np.log1p(gap_prev), np.log1p(gap_next), np.log1p(sustain_s),
                         np.sin(2 * np.pi * beat_phase), np.cos(2 * np.pi * beat_phase),
                         np.full_like(times, shift / 12.0)], axis=1).astype(np.float32)
-    return np.concatenate(onsets + held + centred + [scalars], axis=1)
+    return np.hstack([stats, stats - before, after - stats, scalars]).astype(np.float32)
 
 
 class _Encoder(nn.Module):
     def __init__(self, n_in: int, width: int, layers: int):
         super().__init__()
-        self.inp = nn.Sequential(nn.Linear(n_in, width), nn.GELU(), nn.LayerNorm(width))
+        self.inp = nn.Sequential(nn.Linear(n_in, width), nn.GELU(), nn.LayerNorm(width),
+                                 nn.Dropout(0.2))
         self.pos = nn.Embedding(WINDOW, width)
-        layer = nn.TransformerEncoderLayer(width, 8, 4 * width, dropout=0.1,
+        layer = nn.TransformerEncoderLayer(width, 4, 4 * width, dropout=0.2,
                                            batch_first=True, norm_first=True)
         self.body = nn.TransformerEncoder(layer, layers)
 
@@ -90,7 +110,7 @@ class _Encoder(nn.Module):
 class ShapeNet(nn.Module):
     """Per position: logits over the 64 button bitmasks."""
 
-    def __init__(self, width: int = 256, layers: int = 6):
+    def __init__(self, width: int = 128, layers: int = 4):
         super().__init__()
         self.encoder = _Encoder(N_FEATURES, width, layers)
         self.head = nn.Linear(width, 1 << BUTTONS)
@@ -103,7 +123,7 @@ class ReduceNet(nn.Module):
     """Per position and lower tier: keep logit plus 64 shape logits, from
     the Expert shape and the timing scalars."""
 
-    def __init__(self, width: int = 192, layers: int = 4):
+    def __init__(self, width: int = 128, layers: int = 3):
         super().__init__()
         self.encoder = _Encoder((1 << BUTTONS) + SCALARS, width, layers)
         self.head = nn.Linear(width, len(TIERS) * (1 + (1 << BUTTONS)))
@@ -143,8 +163,7 @@ def _models(device: str):
         shape_net, reduce_net = ShapeNet(), ReduceNet()
         shape_net.load_state_dict({k: v.float() for k, v in saved["shape"].items()})
         reduce_net.load_state_dict({k: v.float() for k, v in saved["reduce"].items()})
-        _MODELS[device] = (shape_net.to(device).eval(), reduce_net.to(device).eval(),
-                           saved["allowed"])
+        _MODELS[device] = (shape_net.to(device).eval(), reduce_net.to(device).eval(), saved)
     return _MODELS[device]
 
 
@@ -161,7 +180,8 @@ def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
     if not MODEL_PATH.is_file() or not expert:
         return {}
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    shape_net, reduce_net, allowed = _models(device)
+    shape_net, reduce_net, saved = _models(device)
+    allowed = saved["allowed"]
     res = tempo.resolution
     sustain_of: dict[int, int] = {}
     for tick, _, sus in expert:
@@ -170,7 +190,8 @@ def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
     times = np.array([tempo.beat_to_time(t / res) for t in ticks])
     sustain_s = np.array([tempo.beat_to_time((t + sustain_of[t]) / res) for t in ticks]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)
-    shapes = _masked(windowed(shape_net, x, device), allowed["Expert"])
+    shapes = viterbi(windowed(shape_net, x, device), saved["transitions"].cpu().numpy(), allowed["Expert"],
+                     saved["transition_weight"])
     reduced = windowed(reduce_net, reduce_inputs(shapes, x[:, -SCALARS:]), device)
 
     def notes(keep, tier_shapes):
@@ -182,3 +203,25 @@ def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
         out[f"{tier}GHLGuitar"] = notes(reduced[:, k, 0] > 0,
                                         _masked(reduced[:, k, 1:], allowed[tier]))
     return out
+
+
+def viterbi(logits: np.ndarray, transitions: np.ndarray, allowed, weight: float) -> np.ndarray:
+    """The shape sequence that maximises the model's per-position log
+    probabilities plus weight x the official charts' shape-to-shape log
+    probabilities, over the allowed shapes only."""
+    logp = logits - np.logaddexp.reduce(logits, axis=1, keepdims=True)
+    banned = np.ones(logits.shape[1], bool)
+    banned[list(allowed)] = False
+    logp[:, banned] = -np.inf
+    step = weight * transitions
+    score = logp[0].copy()
+    back = np.zeros(logp.shape, dtype=np.int64)
+    for i in range(1, len(logp)):
+        candidates = score[:, None] + step
+        back[i] = candidates.argmax(0)
+        score = candidates.max(0) + logp[i]
+    path = np.zeros(len(logp), dtype=np.int64)
+    path[-1] = score.argmax()
+    for i in range(len(logp) - 1, 0, -1):
+        path[i - 1] = back[i, path[i]]
+    return path
