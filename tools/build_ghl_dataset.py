@@ -91,9 +91,14 @@ def main(argv=None):
 
     for index, folder in enumerate(todo, 1):
         started = time.time()
-        audio = next_audio.result()
+        loaded = next_audio
         if index < len(todo):
             next_audio = loader.submit(mix, todo[index])
+        try:
+            audio = loaded.result()
+        except (OSError, ValueError) as error:
+            print(f"skip {folder.name}: audio unreadable ({error})", flush=True)
+            continue
         chart = load(folder / "notes.mid")
         if chart is None or not chart.tiers["Expert"]:
             print(f"skip {folder.name}: no GHL Expert", flush=True)
