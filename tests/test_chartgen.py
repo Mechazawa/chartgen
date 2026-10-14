@@ -173,7 +173,8 @@ def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
         torch.save({"shape": ghl.ShapeNet().state_dict(), "reduce": ghl.ReduceNet().state_dict(),
                     "allowed": allowed, "transitions": torch.zeros(64, 64),
                     "transition_weight": 1.0,
-                    "keep_share": {"Hard": 0.75, "Medium": 0.5, "Easy": 0.35}}, path)
+                    "keep_share": {"Hard": 0.75, "Medium": 0.5, "Easy": 0.35},
+                    "config": {"shape": {}, "reduce": {}}}, path)
         saved_path, ghl.MODEL_PATH = ghl.MODEL_PATH, path
         ghl._MODELS.clear()
         try:

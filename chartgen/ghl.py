@@ -93,12 +93,12 @@ def features(times: np.ndarray, beat_phase: np.ndarray, sustain_s: np.ndarray,
 
 
 class _Encoder(nn.Module):
-    def __init__(self, n_in: int, width: int, layers: int):
+    def __init__(self, n_in: int, width: int, layers: int, dropout: float):
         super().__init__()
         self.inp = nn.Sequential(nn.Linear(n_in, width), nn.GELU(), nn.LayerNorm(width),
-                                 nn.Dropout(0.2))
+                                 nn.Dropout(dropout))
         self.pos = nn.Embedding(WINDOW, width)
-        layer = nn.TransformerEncoderLayer(width, 4, 4 * width, dropout=0.2,
+        layer = nn.TransformerEncoderLayer(width, 4, 4 * width, dropout=dropout,
                                            batch_first=True, norm_first=True)
         self.body = nn.TransformerEncoder(layer, layers)
 
@@ -110,9 +110,9 @@ class _Encoder(nn.Module):
 class ShapeNet(nn.Module):
     """Per position: logits over the 64 button bitmasks."""
 
-    def __init__(self, width: int = 128, layers: int = 4):
+    def __init__(self, width: int = 128, layers: int = 4, dropout: float = 0.2):
         super().__init__()
-        self.encoder = _Encoder(N_FEATURES, width, layers)
+        self.encoder = _Encoder(N_FEATURES, width, layers, dropout)
         self.head = nn.Linear(width, 1 << BUTTONS)
 
     def forward(self, x, pad):
@@ -123,9 +123,9 @@ class ReduceNet(nn.Module):
     """Per position and lower tier: keep logit plus 64 shape logits, from
     the Expert shape and the timing scalars."""
 
-    def __init__(self, width: int = 128, layers: int = 3):
+    def __init__(self, width: int = 128, layers: int = 3, dropout: float = 0.2):
         super().__init__()
-        self.encoder = _Encoder((1 << BUTTONS) + SCALARS, width, layers)
+        self.encoder = _Encoder((1 << BUTTONS) + SCALARS, width, layers, dropout)
         self.head = nn.Linear(width, len(TIERS) * (1 + (1 << BUTTONS)))
 
     def forward(self, x, pad):
@@ -160,7 +160,8 @@ _MODELS: dict = {}
 def _models(device: str):
     if device not in _MODELS:
         saved = torch.load(MODEL_PATH, map_location=device)
-        shape_net, reduce_net = ShapeNet(), ReduceNet()
+        shape_net = ShapeNet(**saved["config"]["shape"])
+        reduce_net = ReduceNet(**saved["config"]["reduce"])
         shape_net.load_state_dict({k: v.float() for k, v in saved["shape"].items()})
         reduce_net.load_state_dict({k: v.float() for k, v in saved["reduce"].items()})
         _MODELS[device] = (shape_net.to(device).eval(), reduce_net.to(device).eval(), saved)

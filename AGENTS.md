@@ -12,7 +12,7 @@
 - Training data are the official FreeStyleGames charts only (Guitar Hero Live on-disc and GHTV, 562 songs). Do not mix in community charts or 5-to-6 converts.
   1. `data/ghl-official/` holds the song folders: Drive rips of the on-disc set, plus `python -m tools.fetch_official_ghl` for the Encore rows with icon `ghl`/`ghtv`.
   2. `python -m tools.build_ghl_dataset data/ghl-official` runs the pipeline's listening front end (Basic Pitch on the mix and on every BS-RoFormer stem) into `data/ghl-features/*.pkl`. It needs about 35 s a song on an RTX 3060 and takes the whole GPU, so run nothing else on the GPU in parallel.
-  3. `python -m tools.train_ghl data/ghl-features --charts data/ghl-official` trains both models and records the held-out songs in the model file.
+  3. `python -m tools.train_ghl data/ghl-features --sweep 16` trains both models (16 random configurations each, best validation loss wins) and records the configuration and the held-out songs in the model file. Curves: `tensorboard --logdir data/ghl-runs --host 127.0.0.1`.
   4. `python -m tools.eval_ghl -n 10` charts held-out songs end to end and scores the 6-fret part against the official chart.
 - The chart-to-audio offset of an official song is its `song.ini` `delay`. Onset matching alone locks onto a beat-multiple on periodic music.
 - Official ladder facts (from the official charts): every lower-tier note sits on an Expert tick, Easy uses only W1/W2/W3, W1+W2 and W2+W3, and Medium has no 3-button chords.

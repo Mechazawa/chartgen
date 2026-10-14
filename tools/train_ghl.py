@@ -8,6 +8,9 @@ never sits on both sides of the split. Writes chartgen/ghl_model.pt.
 Losses and validation metrics stream to TensorBoard under --runs; watch
 them with `tensorboard --logdir data/ghl-runs --host 127.0.0.1`.
 
+--sweep N trains N random configurations of each network (size, depth,
+dropout, learning rate) and keeps the one with the lowest validation loss.
+
     python -m tools.train_ghl data/ghl-features --charts data/ghl-official
 """
 import argparse
@@ -32,6 +35,9 @@ HOLDOUT_SHARE = 0.1
 VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
 TRANSITION_WEIGHTS = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
+SWEEP = {"width": (64, 128, 256), "layers": (2, 4, 6), "dropout": (0.1, 0.2, 0.3),
+         "lr": (1e-4, 3e-4, 1e-3)}
+DEFAULT = {"width": 128, "layers": 4, "dropout": 0.2, "lr": 3e-4}
 BUTTON_COUNT = torch.tensor([shape.bit_count() for shape in range(1 << ghl.BUTTONS)])
 # A shape the official charts use fewer times than this on a tier is
 # never emitted there (Easy, for one, is white-row only).
@@ -128,7 +134,7 @@ def train(model, songs, val_songs, steps, batch, lr, device, loss_of, board, tag
         if step % 25 == 0:
             board.add_scalar(f"{tag}/loss/train", loss.item(), step)
             board.add_scalar(f"{tag}/learning_rate", sched.get_last_lr()[0], step)
-        if step % VALIDATE_EVERY == 0:
+        if step % VALIDATE_EVERY == 0 or step == steps:
             model.eval()
             with torch.no_grad(), torch.autocast(device, dtype=torch.bfloat16):
                 results = [loss_of(model, items) for items in val_batches]
@@ -143,6 +149,26 @@ def train(model, songs, val_songs, steps, batch, lr, device, loss_of, board, tag
             print(f"  step {step}/{steps} train {loss.item():.3f} val {val:.3f}", flush=True)
     model.load_state_dict(best_state)
     print(f"  kept the weights at val loss {best:.3f}", flush=True)
+    return best
+
+
+def fit(net, configs, train_songs, val_songs, steps, batch, device, loss_of, runs):
+    """Train one net per configuration; the lowest validation loss wins.
+    Returns (model, its configuration without the learning rate)."""
+    best = None
+    for config in configs:
+        name = "-".join(f"{k}{v}" for k, v in config.items())
+        print(f"training {net.__name__} {name}", flush=True)
+        model = net(**{k: v for k, v in config.items() if k != "lr"})
+        board = SummaryWriter(runs / name)
+        loss = train(model, train_songs, val_songs, steps, batch, config["lr"], device,
+                     loss_of, board, net.__name__)
+        board.add_hparams(config, {"best_validation_loss": loss})
+        board.close()
+        if best is None or loss < best[0]:
+            best = (loss, model, config)
+    print(f"{net.__name__}: kept {best[2]} at validation loss {best[0]:.3f}", flush=True)
+    return best[1], {k: v for k, v in best[2].items() if k != "lr"}
 
 
 def shape_loss(device):
@@ -280,7 +306,8 @@ def main(argv=None):
     ap.add_argument("--charts", type=Path, default=Path("data/ghl-official"))
     ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--batch", type=int, default=32)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--sweep", type=int, default=0, metavar="N",
+                    help="try N random configurations per network instead of the default")
     ap.add_argument("-o", "--out", type=Path, default=ghl.MODEL_PATH)
     ap.add_argument("--runs", type=Path, default=Path("data/ghl-runs"))
     args = ap.parse_args(argv)
@@ -302,16 +329,17 @@ def main(argv=None):
     print(f"train {len(train_songs)}, validation {len(val_songs)}, holdout {len(test_songs)}",
           flush=True)
 
-    board = SummaryWriter(args.runs / time.strftime("%Y-%m-%d_%H-%M-%S"))
+    runs = args.runs / time.strftime("%Y-%m-%d_%H-%M-%S")
+    rng = random.Random(2)
+    configs = [{k: rng.choice(v) for k, v in SWEEP.items()} for _ in range(args.sweep)] or [DEFAULT]
+    shape_net, shape_config = fit(ghl.ShapeNet, configs, train_songs, val_songs, args.steps,
+                                  args.batch, device, shape_loss(device), runs / "shape")
+    reduce_net, reduce_config = fit(ghl.ReduceNet, configs, train_songs, val_songs, args.steps // 2,
+                                    args.batch, device, reduce_loss(device), runs / "reduce")
+    board = SummaryWriter(runs / "holdout")
     board.add_text("data", f"{len(train_songs)} train, {len(val_songs)} validation, "
-                           f"{len(test_songs)} holdout songs")
-    shape_net, reduce_net = ghl.ShapeNet(), ghl.ReduceNet()
-    print("training ShapeNet", flush=True)
-    train(shape_net, train_songs, val_songs, args.steps, args.batch, args.lr, device,
-          shape_loss(device), board, "shape")
-    print("training ReduceNet", flush=True)
-    train(reduce_net, train_songs, val_songs, args.steps // 2, args.batch, args.lr, device,
-          reduce_loss(device), board, "reduce")
+                           f"{len(test_songs)} holdout songs; shape {shape_config}, "
+                           f"reduce {reduce_config}")
     allowed = allowed_shapes(train_songs)
     moves = transitions(train_songs)
     weight = pick_weight(shape_net, val_songs, device, allowed["Expert"], moves)
@@ -321,6 +349,7 @@ def main(argv=None):
                 "reduce": {k: v.half() for k, v in reduce_net.state_dict().items()},
                 "allowed": allowed, "transitions": torch.from_numpy(moves), "transition_weight": weight,
                 "keep_share": keep_share(train_songs),
+                "config": {"shape": shape_config, "reduce": reduce_config},
                 "holdout": sorted(holdout)}, args.out)
     print(f"wrote {args.out}")
     return 0
