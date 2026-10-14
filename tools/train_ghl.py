@@ -14,6 +14,7 @@ dropout, learning rate) and keeps the one with the lowest validation loss.
     python -m tools.train_ghl data/ghl-features --charts data/ghl-official
 """
 import argparse
+import json
 import pickle
 import random
 import re
@@ -332,6 +333,10 @@ def main(argv=None):
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--sweep", type=int, default=0, metavar="N",
                     help="try N random configurations per network instead of the default")
+    ap.add_argument("--config", type=json.loads, help="JSON configuration to train instead of the default")
+    ap.add_argument("--train-share", type=float, default=1.0,
+                    help="train on this share of the training songs (for a learning curve)")
+    ap.add_argument("--seed", type=int, default=3, help="picks the songs --train-share keeps")
     ap.add_argument("-o", "--out", type=Path, default=ghl.MODEL_PATH)
     ap.add_argument("--runs", type=Path, default=Path("data/ghl-runs"))
     args = ap.parse_args(argv)
@@ -350,12 +355,13 @@ def main(argv=None):
     train_songs = [s for n, s in songs.items() if song_key(n) not in holdout | validation]
     val_songs = [s for n, s in songs.items() if song_key(n) in validation]
     test_songs = [s for n, s in songs.items() if song_key(n) in holdout]
+    train_songs = random.Random(args.seed).sample(train_songs, round(len(train_songs) * args.train_share))
     print(f"train {len(train_songs)}, validation {len(val_songs)}, holdout {len(test_songs)}",
           flush=True)
 
     runs = args.runs / time.strftime("%Y-%m-%d_%H-%M-%S")
     rng = random.Random(2)
-    configs = [{k: rng.choice(v) for k, v in SWEEP.items()} for _ in range(args.sweep)] or [DEFAULT]
+    configs = [{k: rng.choice(v) for k, v in SWEEP.items()} for _ in range(args.sweep)] or [args.config or DEFAULT]
     shape_net, shape_config = fit(ghl.ShapeNet, configs, train_songs, val_songs, args.steps,
                                   args.batch, device, shape_loss(device), runs / "shape")
     reduce_net, reduce_config = fit(ghl.ReduceNet, configs, train_songs, val_songs, args.steps // 2,
