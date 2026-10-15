@@ -28,7 +28,8 @@ HEARD = 0.2  # amplitude above which a pitch counts as played
 ROWS = len(STREAMS) + 2  # onsets per stream, then held mix and guitar pitches
 STATS = 5
 SCALARS = 6
-N_FEATURES = 3 * ROWS * STATS + SCALARS
+CONTEXT_NOTES = (4, 16)
+N_FEATURES = (3 + len(CONTEXT_NOTES) + 2) * ROWS * STATS + 2 + SCALARS
 WINDOW = 256
 MERGE_S = 0.03  # onsets closer than this are one note-time candidate
 GAP_S = 0.06  # the closest two official Expert notes ever sit
@@ -67,6 +68,21 @@ RELATION_OF = np.array([[_relation(a, b) for b in range(1 << BUTTONS)]
                         for a in range(1 << BUTTONS)])
 
 
+def _factors(shape: int) -> tuple[int, int, int]:
+    """Buttons held (0 open, 3 for any triple), row (0 white, 1 black, 2
+    both) and the set of columns used as a 3-bit mask less one. An open
+    note has no row or columns (-1)."""
+    lanes = [b for b in range(BUTTONS) if shape >> b & 1]
+    if not lanes:
+        return 0, -1, -1
+    row = 0 if max(lanes) < 3 else 1 if min(lanes) >= 3 else 2
+    return min(len(lanes), 3), row, sum(1 << column for column in {b % 3 for b in lanes}) - 1
+
+
+FACTOR_OF = np.array([_factors(shape) for shape in range(1 << BUTTONS)])
+FACTOR_SIZES = (4, 3, 7)
+
+
 def _pitch_rows(events, times: np.ndarray, sounding: bool) -> np.ndarray:
     """[N, 88] max amplitude per pitch of the events starting near (or, with
     sounding, held across) each time."""
@@ -96,12 +112,30 @@ def _stats(rows: np.ndarray, centre: int) -> np.ndarray:
                      np.where(has, low - centre, 0) / 12, np.where(has, top - low, 0) / 12], 1)
 
 
+def _context(stats: np.ndarray, times: np.ndarray) -> np.ndarray:
+    """The stats averaged over CONTEXT_NOTES positions either side, their
+    mean and spread over the song, and the log count of positions within
+    2 s and per second of the song."""
+    total = np.vstack([np.zeros_like(stats[:1]), np.cumsum(stats, 0)])
+    index = np.arange(len(stats))
+    rolling = []
+    for k in CONTEXT_NOTES:
+        low, high = np.maximum(index - k, 0), np.minimum(index + k + 1, len(stats))
+        rolling.append((total[high] - total[low]) / (high - low)[:, None])
+    song = np.hstack([stats.mean(0), stats.std(0)]) if len(stats) else np.zeros(2 * stats.shape[1])
+    near = np.searchsorted(times, times + 2) - np.searchsorted(times, times - 2)
+    rate = len(times) / max(np.ptp(times), 1.0) if len(times) else 0.0
+    return np.hstack([*rolling, np.broadcast_to(song, (len(stats), len(song))),
+                      np.log1p(near)[:, None], np.full((len(stats), 1), np.log1p(rate))])
+
+
 def features(times: np.ndarray, beat_phase: np.ndarray, sustain_s: np.ndarray,
              mix_events, stem_events: dict) -> np.ndarray:
     """[N, N_FEATURES] per chart position: pitch statistics of each stream's
     onsets and of the held mix and guitar notes, their change from the
-    previous position and into the next, and timing scalars. Pitches are
-    relative to the song's centre, so the key does not matter."""
+    previous position and into the next, their context in the song
+    (_context) and timing scalars. Pitches are relative to the song's
+    centre, so the key does not matter."""
     streams = {"mix": mix_events} | {k: v for k, v in stem_events.items() if k in STREAMS}
     centre_events = streams.get("guitar") or mix_events or [(0, 0, 60, 0)]
     centre = int(np.median([e[2] for e in centre_events]))
@@ -117,7 +151,7 @@ def features(times: np.ndarray, beat_phase: np.ndarray, sustain_s: np.ndarray,
     scalars = np.stack([np.log1p(gap_prev), np.log1p(gap_next), np.log1p(sustain_s),
                         np.sin(2 * np.pi * beat_phase), np.cos(2 * np.pi * beat_phase),
                         np.full_like(times, shift / 12.0)], axis=1).astype(np.float32)
-    return np.hstack([stats, stats - before, after - stats, scalars]).astype(np.float32)
+    return np.hstack([stats, stats - before, after - stats, _context(stats, times), scalars]).astype(np.float32)
 
 
 def candidates(mix_events, stem_events: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -178,16 +212,31 @@ class _Encoder(nn.Module):
 
 
 class ShapeNet(nn.Module):
-    """Per position: logits over the 64 button bitmasks, then logits over
-    the RELATIONS to the previous position's shape."""
+    """heads(): per position, logits for each shape factor (FACTOR_SIZES)
+    and for the RELATIONS to the previous position's shape. forward()
+    composes the factors' log probabilities, scaled by factor_weights, into
+    scores over the 64 button bitmasks, adding the official charts' log
+    P(shape | its factors), then the relation logits."""
 
     def __init__(self, width: int = 128, layers: int = 4, dropout: float = 0.2):
         super().__init__()
         self.encoder = _Encoder(N_FEATURES, width, layers, dropout)
-        self.head = nn.Linear(width, (1 << BUTTONS) + RELATIONS)
+        self.head = nn.Linear(width, sum(FACTOR_SIZES) + RELATIONS)
+        self.register_buffer("given_factors", torch.zeros(1 << BUTTONS))
+        self.register_buffer("factor_weights", torch.ones(len(FACTOR_SIZES)))
+        self.register_buffer("factor_of", torch.from_numpy(FACTOR_OF), persistent=False)
+
+    def heads(self, x, pad):
+        return self.head(self.encoder(x, pad)).split([*FACTOR_SIZES, RELATIONS], -1)
 
     def forward(self, x, pad):
-        return self.head(self.encoder(x, pad))
+        *factors, relations = self.heads(x, pad)
+        score = self.given_factors.expand(*relations.shape[:-1], -1)
+        for k, logits in enumerate(factors):
+            index = self.factor_of[:, k]
+            score = score + self.factor_weights[k] * torch.where(
+                index >= 0, logits.log_softmax(-1)[..., index.clamp(min=0)], 0)
+        return torch.cat([score, relations], -1)
 
 
 class ReduceNet(nn.Module):
