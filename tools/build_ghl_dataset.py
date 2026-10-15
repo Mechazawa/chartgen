@@ -10,8 +10,10 @@ GhlChart}, where events are [(start_s, end_s, midi, amplitude)].
 Separation holds the GPU, so one process runs it song by song while a
 thread loads the next song's audio and Basic Pitch transcribes the previous
 songs' streams in CPU worker processes. Each record also holds the beat
-grid the pipeline detects ("tempo": (beat_times, pickup_beats)); a record
-built without one gets it added on the next run.
+grid the pipeline detects ("tempo": (beat_times, pickup_beats)) and the
+mix's onset envelope ("onset_env", chartgen.ghl.onset_envelope); a record
+without them gets them added on the next run, so deleting those keys
+refreshes them after a change to either detector.
 
     python -m tools.build_ghl_dataset data/ghl-official -o data/ghl-features
 """
@@ -30,7 +32,7 @@ import librosa  # noqa: E402
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
 
-from chartgen import prominence, stems, tempo, transcribe  # noqa: E402
+from chartgen import ghl, prominence, stems, tempo, transcribe  # noqa: E402
 from tools.ghl_charts import load  # noqa: E402
 
 NOT_MUSIC = ("preview.opus", "crowd.opus")
@@ -51,9 +53,12 @@ def beat_grid(audio: np.ndarray) -> tuple:
     return found.beat_times, found.pickup_beats
 
 
-def add_beat_grid(path: Path, folder: Path) -> None:
-    record = pickle.loads(path.read_bytes())
-    record["tempo"] = beat_grid(mix(folder))
+def audio_keys(audio: np.ndarray) -> dict:
+    return {"tempo": beat_grid(audio), "onset_env": ghl.onset_envelope(audio, stems.SR)}
+
+
+def add_audio_keys(path: Path, folder: Path) -> None:
+    record = pickle.loads(path.read_bytes()) | audio_keys(mix(folder))
     path.write_bytes(pickle.dumps(record))
 
 
@@ -91,19 +96,19 @@ def main(argv=None):
     print(f"{len(folders)} songs, {len(todo)} to build", flush=True)
     pool = ProcessPoolExecutor(TRANSCRIBE_WORKERS)
     built = [(args.out / f"{f.name}.pkl", f) for f in folders if (args.out / f"{f.name}.pkl").exists()]
-    no_grid = [(path, f) for path, f in built if "tempo" not in pickle.loads(path.read_bytes())]
-    if no_grid:
-        print(f"adding the beat grid to {len(no_grid)} records", flush=True)
-        list(pool.map(add_beat_grid, *zip(*no_grid, strict=True)))
+    stale = [(path, f) for path, f in built if not {"tempo", "onset_env"} <= pickle.loads(path.read_bytes()).keys()]
+    if stale:
+        print(f"adding the beat grid and onset envelope to {len(stale)} records", flush=True)
+        list(pool.map(add_audio_keys, *zip(*stale, strict=True)))
     loader = ThreadPoolExecutor(1)
     next_audio = loader.submit(mix, todo[0]) if todo else None
     pending = []
 
     def finish(entry):
-        index, folder, chart, grid, started, mix_job, stem_jobs = entry
+        index, folder, chart, audio_keys, started, mix_job, stem_jobs = entry
         record = {"mix": mix_job.result(),
                   "stems": {name: job.result() for name, job in stem_jobs.items()},
-                  "chart": chart, "tempo": grid}
+                  "chart": chart} | audio_keys
         (args.out / f"{folder.name}.pkl").write_bytes(pickle.dumps(record))
         print(f"[{index}/{len(todo)}] {folder.name} {time.time() - started:.0f}s", flush=True)
 
@@ -125,7 +130,7 @@ def main(argv=None):
         if mono is None:
             print(f"skip {folder.name}: BS-RoFormer separation failed", flush=True)
             continue
-        pending.append((index, folder, chart, beat_grid(audio), started, pool.submit(transcribe_audio, audio),
+        pending.append((index, folder, chart, audio_keys(audio), started, pool.submit(transcribe_audio, audio),
                         {name: pool.submit(transcribe_audio, mono[name])
                          for name in prominence.STEMS}))
         while len(pending) > 3:  # bounds the stems held in memory

@@ -10,11 +10,14 @@ of every stream, ShapeNet picks the Expert shape at each of them from the
 pitches heard around it, and ReduceNet derives Hard, Medium and Easy from
 the Expert shapes.
 """
+import bisect
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch import nn
+
+from .tempo import ONSET_LAG_S
 
 OPEN = 7
 BUTTONS = 6
@@ -31,10 +34,21 @@ SCALARS = 6
 CONTEXT_NOTES = (4, 16)
 N_FEATURES = (3 + len(CONTEXT_NOTES) + 2) * ROWS * STATS + 2 + SCALARS
 WINDOW = 256
-MERGE_S = 0.03  # onsets closer than this are one note-time candidate
+MERGE_S = 0.03  # onsets this close to a slot count as heard there
 GAP_S = 0.06  # the closest two official Expert notes ever sit
-GRID = 4  # notes snap to 16ths
-N_TIMING = N_FEATURES - 2 + 5
+GRID = 4  # 16ths, the grid the tier features describe
+SLOTS_PER_BEAT = 12  # 16ths plus 8th and 16th triplets: every official note but 32nds
+ENVELOPE_SR, ENVELOPE_HOP = 22050, 512
+ENVELOPE_FRAMES = 2  # envelope samples either side of a slot
+N_TIMING = N_FEATURES - 2 + 7 + 2 * ENVELOPE_FRAMES + 1
+# Official Expert notes with at least this long a gap to the next note are
+# sustained, to that next note (F1 0.80 on held-out songs; opens never are).
+SUSTAIN_GAP_S = 0.3
+# A lower tier keeps an Expert sustain when its own next note is at least
+# this many beats away, and never places two notes closer than its gap.
+TIER_SUSTAIN_BEATS = {"Hard": 1.0, "Medium": 2.0, "Easy": 2.25}
+TIER_MIN_GAP_BEATS = {"Hard": 1 / 12, "Medium": 0.2, "Easy": 1 / 3}
+TIER_FEATURES = 20
 
 
 def shape_class(lanes) -> int:
@@ -154,35 +168,51 @@ def features(times: np.ndarray, beat_phase: np.ndarray, sustain_s: np.ndarray,
     return np.hstack([stats, stats - before, after - stats, _context(stats, times), scalars]).astype(np.float32)
 
 
-def candidates(mix_events, stem_events: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Note-time candidates: the onsets of the mix and every stem merged
-    into MERGE_S clusters, as (first onset, events in the cluster)."""
-    onsets = np.sort([e[0] for events in [mix_events, *stem_events.values()] for e in events])
-    if not len(onsets):
-        return onsets, onsets
-    first = [0]
-    for i in range(1, len(onsets)):
-        if onsets[i] - onsets[first[-1]] > MERGE_S:
-            first.append(i)
-    first = np.array(first)
-    return onsets[first], np.diff(first, append=len(onsets)).astype(np.float32)
+def onset_envelope(y: np.ndarray, sr: int) -> np.ndarray:
+    """librosa onset strength of the mix at ENVELOPE_SR, over its 95th
+    percentile."""
+    import librosa
+
+    if sr != ENVELOPE_SR:
+        y = librosa.resample(y, orig_sr=sr, target_sr=ENVELOPE_SR)
+    env = librosa.onset.onset_strength(y=y, sr=ENVELOPE_SR, hop_length=ENVELOPE_HOP)
+    return (env / max(float(np.percentile(env, 95)), 1e-6)).astype(np.float32)
 
 
-def timing_features(times: np.ndarray, counts: np.ndarray, tempo, mix_events,
+def slots(tempo, end_s: float) -> tuple[np.ndarray, np.ndarray]:
+    """Note-time candidates: (ticks, seconds) of every SLOTS_PER_BEAT
+    position of the beat grid up to end_s."""
+    step = tempo.resolution // SLOTS_PER_BEAT
+    ticks = np.arange(0, round(tempo.time_to_beat(end_s) * tempo.resolution) + 1, step)
+    return ticks, np.array([tempo.beat_to_time(t / tempo.resolution) for t in ticks])
+
+
+def timing_features(ticks: np.ndarray, times: np.ndarray, res: int, envelope: np.ndarray, mix_events,
                     stem_events: dict) -> np.ndarray:
-    """[N, N_TIMING] per candidate: the pitch statistics of features(), the
-    gaps to the neighbouring candidates, how many onsets it merges, and
-    where it sits on the beat grid."""
-    beat = np.array([tempo.time_to_beat(t) for t in times])
+    """[N, N_TIMING] per slot: the pitch statistics of features(), how many
+    onsets of any stream fall within MERGE_S and how far the nearest is,
+    the onset envelope around it, and which grids it belongs to."""
+    beat = ticks / res
     x = features(times, beat % 1, np.zeros_like(times), mix_events, stem_events)
     x = np.delete(x, [N_FEATURES - 4, N_FEATURES - 1], axis=1)  # sustain and key shift
-    grid = np.stack([np.log1p(counts), np.abs(beat * 4 - np.round(beat * 4)),
-                     np.abs(beat * 3 - np.round(beat * 3)), np.sin(np.pi * beat), np.cos(np.pi * beat)], 1)
-    return np.hstack([x, grid]).astype(np.float32)
+    onsets = np.sort([e[0] for events in [mix_events, *stem_events.values()] for e in events])
+    low, high = np.searchsorted(onsets, times - MERGE_S), np.searchsorted(onsets, times + MERGE_S)
+    if len(onsets):
+        k = np.clip(np.searchsorted(onsets, times), 1, len(onsets) - 1)
+        nearest = np.minimum(np.abs(onsets[k] - times), np.abs(onsets[k - 1] - times))
+    else:
+        nearest = np.full(len(times), 1.0)
+    frame = np.round((times + ONSET_LAG_S) * ENVELOPE_SR / ENVELOPE_HOP).astype(int)
+    around = np.stack([envelope[np.clip(frame + d, 0, len(envelope) - 1)] if len(envelope) else np.zeros(len(times))
+                       for d in range(-ENVELOPE_FRAMES, ENVELOPE_FRAMES + 1)], 1)
+    slot = ticks % res * SLOTS_PER_BEAT // res
+    grid = np.stack([np.log1p(high - low), np.log1p(nearest * 100), slot % 3 == 0, slot % 4 == 0,
+                     slot % 2 == 0, np.sin(np.pi * beat), np.cos(np.pi * beat)], 1)
+    return np.hstack([x, grid, around]).astype(np.float32)
 
 
-def pick_times(logits: np.ndarray, times: np.ndarray, threshold: float) -> np.ndarray:
-    """The candidates above threshold, most likely first, skipping any
+def pick_slots(logits: np.ndarray, times: np.ndarray, threshold: float) -> np.ndarray:
+    """Indices of the slots above threshold, most likely first, skipping any
     within GAP_S of one already picked."""
     taken = np.zeros(len(times), bool)
     picked = []
@@ -190,10 +220,10 @@ def pick_times(logits: np.ndarray, times: np.ndarray, threshold: float) -> np.nd
         if logits[i] <= threshold:
             break
         if not taken[i]:
-            picked.append(times[i])
+            picked.append(i)
             low, high = np.searchsorted(times, [times[i] - GAP_S, times[i] + GAP_S])
             taken[low:high] = True
-    return np.sort(picked)
+    return np.sort(np.array(picked, dtype=np.int64))
 
 
 class _Encoder(nn.Module):
@@ -241,11 +271,11 @@ class ShapeNet(nn.Module):
 
 class ReduceNet(nn.Module):
     """Per position and lower tier: keep logit plus 64 shape logits, from
-    the Expert shape and the timing scalars."""
+    the Expert shape and tier_features()."""
 
     def __init__(self, width: int = 128, layers: int = 3, dropout: float = 0.2):
         super().__init__()
-        self.encoder = _Encoder((1 << BUTTONS) + SCALARS, width, layers, dropout)
+        self.encoder = _Encoder((1 << BUTTONS) + TIER_FEATURES, width, layers, dropout)
         self.head = nn.Linear(width, len(TIERS) * (1 + (1 << BUTTONS)))
 
     def forward(self, x, pad):
@@ -266,8 +296,72 @@ class TimingNet(nn.Module):
         return self.head(self.encoder(x, pad))
 
 
-def reduce_inputs(shapes: np.ndarray, scalars: np.ndarray) -> np.ndarray:
-    return np.concatenate([np.eye(1 << BUTTONS, dtype=np.float32)[shapes], scalars], axis=1)
+def tier_features(ticks: np.ndarray, sustain: np.ndarray, shapes: np.ndarray, res: int) -> np.ndarray:
+    """[N, TIER_FEATURES] per Expert position, from the chart alone: its
+    16th within the beat, the gaps to the two notes either side in beats,
+    its sustain, chord size, row and repeat, and its neighbours' size and
+    whether they sit on the beat."""
+    beat = ticks / res
+    sixteenth = np.round(beat * 4)
+    phase = np.eye(4, dtype=np.float32)[(sixteenth % 4).astype(int)]
+    off_grid = np.abs(beat * 4 - sixteenth) > 0.05
+    gap = np.diff(beat)
+
+    def shifted(values, by, fill):
+        out = np.full(len(values), fill, dtype=np.float32)
+        if by > 0:
+            out[by:] = values[:-by]
+        else:
+            out[:by] = values[-by:]
+        return out
+
+    before = np.concatenate([[4.0], gap])
+    after = np.concatenate([gap, [4.0]])
+    size = np.minimum(np.bitwise_count(shapes), 3).astype(np.float32)
+    row = np.array([3 if not s else 0 if s < 8 else 1 if not s & 7 else 2 for s in shapes])
+    on_beat = (sixteenth % 4 == 0).astype(np.float32)
+    columns = [*phase.T, off_grid, np.log1p(before), np.log1p(after), np.log1p(shifted(before, 1, 4.0)),
+               np.log1p(shifted(after, -1, 4.0)), np.log1p(sustain / res), size / 3,
+               *np.eye(4, dtype=np.float32)[row].T, shifted(shapes, 1, -1) == shapes,
+               shifted(size, 1, 0) / 3, shifted(size, -1, 0) / 3, shifted(on_beat, 1, 0), shifted(on_beat, -1, 0)]
+    return np.stack(columns, 1).astype(np.float32)
+
+
+def reduce_inputs(shapes: np.ndarray, tier_x: np.ndarray) -> np.ndarray:
+    return np.concatenate([np.eye(1 << BUTTONS, dtype=np.float32)[shapes], tier_x], axis=1)
+
+
+def nested_keep(scores: np.ndarray, ticks: np.ndarray, keep_share: dict, res: int) -> dict[str, np.ndarray]:
+    """Per lower tier: the official share of Expert positions, best score
+    first, each tier drawn from the one above it and never closer than its
+    minimum gap."""
+    out, pool = {}, np.ones(len(ticks), bool)
+    for k, tier in enumerate(TIERS):
+        keep = np.zeros(len(ticks), bool)
+        kept_ticks: list[int] = []
+        gap = TIER_MIN_GAP_BEATS[tier] * res
+        for i in np.argsort(-scores[:, k]):
+            if len(kept_ticks) >= round(keep_share[tier] * len(ticks)):
+                break
+            at = bisect.bisect_left(kept_ticks, ticks[i])
+            if pool[i] and all(abs(ticks[i] - t) >= gap for t in kept_ticks[max(0, at - 1):at + 1]):
+                keep[i] = True
+                kept_ticks.insert(at, int(ticks[i]))
+        out[tier] = pool = keep
+    return out
+
+
+def sustains(ticks: np.ndarray, keep: np.ndarray, expert_sustained: np.ndarray, min_beats: float,
+             res: int) -> np.ndarray:
+    """Per position: the sustain a tier gives it, which runs to the tier's
+    next note when the Expert note is sustained and that note is at least
+    min_beats away."""
+    kept = ticks[keep]
+    following = np.concatenate([kept[1:], [kept[-1] if len(kept) else 0]])
+    out = np.zeros(len(ticks), dtype=np.int64)
+    room = following - kept
+    out[keep] = np.where(expert_sustained[keep] & (room >= min_beats * res), room, 0)
+    return out
 
 
 def windowed(model: nn.Module, x: np.ndarray, device: str) -> np.ndarray:
@@ -309,47 +403,43 @@ def _masked(logits: np.ndarray, allowed) -> np.ndarray:
     return (logits + mask).argmax(-1)
 
 
-def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
+def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
     """{"ExpertGHLGuitar": notes, "HardGHLGuitar": ...}, or {} when no
-    trained model ships. Sustains come from the 5-fret Expert note on the
-    same 16th, cut short of the next 6-fret note."""
-    candidate_times, counts = candidates(mix_events, stem_events)
-    if not MODEL_PATH.is_file() or not len(candidate_times):
+    trained model ships. envelope is onset_envelope() of the mix."""
+    onsets = [e[0] for events in [mix_events, *stem_events.values()] for e in events]
+    if not MODEL_PATH.is_file() or not onsets:
         return {}
     device = "cuda" if torch.cuda.is_available() else "cpu"
     timing_net, shape_net, reduce_net, saved = _models(device)
     allowed = saved["allowed"]
     res = tempo.resolution
-    x = timing_features(candidate_times, counts, tempo, mix_events, stem_events)
-    picked = pick_times(windowed(timing_net, x, device)[:, 0], candidate_times, saved["timing_threshold"])
-    ticks = np.array(sorted({tempo.quantize(t, GRID) for t in picked}))
+    slot_ticks, slot_times = slots(tempo, max(onsets) + 1.0)
+    x = timing_features(slot_ticks, slot_times, res, envelope, mix_events, stem_events)
+    ticks = slot_ticks[pick_slots(windowed(timing_net, x, device)[:, 0], slot_times, saved["timing_threshold"])]
     if not len(ticks):
         return {}
-    five_fret: dict[int, int] = {}
-    for tick, _, sus in expert:
-        snapped = round(tick * GRID / res) * res // GRID
-        five_fret[snapped] = max(five_fret.get(snapped, 0), sus)
-    room = np.diff(ticks, append=ticks[-1] + 4 * res) - res // GRID
-    sustain_of = {int(t): sus if (sus := min(five_fret.get(int(t), 0), int(r))) >= res // GRID else 0
-                  for t, r in zip(ticks, room, strict=True)}
     times = np.array([tempo.beat_to_time(t / res) for t in ticks])
-    sustain_s = np.array([tempo.beat_to_time((t + sustain_of[t]) / res) for t in ticks]) - times
+    everywhere = np.ones(len(ticks), bool)
+    sustained = np.diff(times, append=times[-1]) >= SUSTAIN_GAP_S
+    expert_sustain = sustains(ticks, everywhere, sustained, 0, res)
+    sustain_s = np.array([tempo.beat_to_time((t + s) / res) for t, s in zip(ticks, expert_sustain, strict=True)]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)
     shapes = viterbi(windowed(shape_net, x, device), saved["transitions"].cpu().numpy(),
                      allowed["Expert"], *saved["decode_weights"])
-    reduced = windowed(reduce_net, reduce_inputs(shapes, x[:, -SCALARS:]), device)
+    sustained &= shapes != 0
+    expert_sustain[~sustained] = 0
+    reduced = windowed(reduce_net, reduce_inputs(shapes, tier_features(ticks, expert_sustain, shapes, res)), device)
 
-    def notes(keep, tier_shapes):
-        return [(int(t), lane, sustain_of[t]) for t, k, s in zip(ticks, keep, tier_shapes, strict=True)
+    def notes(keep, tier_shapes, tier_sustain):
+        return [(int(t), lane, int(sus)) for t, k, s, sus in zip(ticks, keep, tier_shapes, tier_sustain, strict=True)
                 if k for lane in class_lanes(int(s))]
 
-    out = {"ExpertGHLGuitar": notes(np.ones(len(ticks), bool), shapes)}
+    out = {"ExpertGHLGuitar": notes(everywhere, shapes, expert_sustain)}
+    kept = nested_keep(reduced[..., 0], ticks, saved["keep_share"], res)
     for k, tier in enumerate(TIERS):
-        # Each tier keeps the share of Expert positions the official charts
-        # keep, taking the positions the model most wants to keep.
-        keep = np.zeros(len(ticks), bool)
-        keep[np.argsort(-reduced[:, k, 0])[:round(saved["keep_share"][tier] * len(ticks))]] = True
-        out[f"{tier}GHLGuitar"] = notes(keep, _masked(reduced[:, k, 1:], allowed[tier]))
+        tier_shapes = _masked(reduced[:, k, 1:], allowed[tier])
+        tier_sustain = sustains(ticks, kept[tier], sustained & (tier_shapes != 0), TIER_SUSTAIN_BEATS[tier], res)
+        out[f"{tier}GHLGuitar"] = notes(kept[tier], tier_shapes, tier_sustain)
     return out
 
 

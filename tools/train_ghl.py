@@ -33,6 +33,7 @@ from chartgen import ghl, tempo
 # only refine it, since on periodic music their mode can sit a beat away.
 OFFSET_REFINE_S, OFFSET_BIN_S = 0.05, 0.005
 MATCH_S = 0.05  # a picked note this close to an official one is a hit
+SLOT_MATCH_S = 0.035  # half the spacing of 12 slots a beat at 145 BPM
 HOLDOUT_SHARE = 0.1
 VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
@@ -73,7 +74,15 @@ def audio_offset(note_s: np.ndarray, events, delay_s: float) -> float:
     return delay_s + float(values[counts.argmax()] * OFFSET_BIN_S)
 
 
+def beat_grid(record: dict) -> tempo.TempoMap:
+    beats, pickup = record["tempo"]
+    return tempo.TempoMap(beat_times=np.asarray(beats), resolution=tempo.RESOLUTION, pickup_beats=int(pickup))
+
+
 def song_arrays(record: dict, delay_s: float) -> dict:
+    """Per official Expert position: features, shapes and the lower tiers'
+    keep and shapes, plus its tick and sustain on the pipeline's own beat
+    grid, which is what the reduce inputs see at run time."""
     chart = record["chart"]
     expert = chart.tiers["Expert"]
     ticks = np.array([t for t, _, _ in expert])
@@ -92,25 +101,30 @@ def song_arrays(record: dict, delay_s: float) -> dict:
             if t in index:
                 keep[index[t], k] = 1
                 tier_shapes[index[t], k] = ghl.shape_class(s)
+    grid = beat_grid(record)
+    beats = np.array([grid.time_to_beat(t) for t in times])
+    sustain_beats = np.array([grid.time_to_beat(t + sus) for t, sus in zip(times, sustain_s, strict=True)]) - beats
     return {"x": x.astype(np.float16), "shapes": shapes, "keep": keep,
-            "tier_shapes": tier_shapes, "offset": offset}
+            "tier_shapes": tier_shapes, "offset": offset,
+            "grid_ticks": (np.round(beats * ghl.GRID) * tempo.RESOLUTION // ghl.GRID).astype(np.int64),
+            "sustain_ticks": np.round(sustain_beats * tempo.RESOLUTION).astype(np.int64)}
 
 
 def timing_arrays(record: dict, delay_s: float) -> tuple[dict, tuple]:
-    """({"x", "label"} per note-time candidate, (candidate times, official
-    note times, beat grid)). The label marks the candidate nearest each
-    official Expert note, when within MATCH_S."""
-    beats, pickup = record["tempo"]
-    grid = tempo.TempoMap(beat_times=np.asarray(beats), resolution=tempo.RESOLUTION, pickup_beats=int(pickup))
-    times, counts = ghl.candidates(record["mix"], record["stems"])
+    """({"x", "label"} per slot of the pipeline's beat grid, (slot ticks,
+    slot times, official note times)). The label marks the slot nearest
+    each official Expert note, when within SLOT_MATCH_S."""
+    grid = beat_grid(record)
     chart = record["chart"]
     official = np.array([chart.seconds(t) for t in sorted({t for t, _, _ in chart.tiers["Expert"]})]) + delay_s
+    onsets = [e[0] for events in [record["mix"], *record["stems"].values()] for e in events]
+    ticks, times = ghl.slots(grid, max([*onsets, *official]) + 1.0)
     k = np.clip(np.searchsorted(times, official), 1, len(times) - 1)
     nearest = np.where(np.abs(times[k] - official) < np.abs(times[k - 1] - official), k, k - 1)
     label = np.zeros(len(times), dtype=np.float32)
-    label[nearest[np.abs(times[nearest] - official) <= MATCH_S]] = 1
-    x = ghl.timing_features(times, counts, grid, record["mix"], record["stems"])
-    return {"x": x.astype(np.float16), "label": label}, (times, official, grid)
+    label[nearest[np.abs(times[nearest] - official) <= SLOT_MATCH_S]] = 1
+    x = ghl.timing_features(ticks, times, tempo.RESOLUTION, record["onset_env"], record["mix"], record["stems"])
+    return {"x": x.astype(np.float16), "label": label}, (ticks, times, official)
 
 
 def crops(songs, rng, batch):
@@ -134,7 +148,8 @@ def stack(items, key, dtype):
 
 
 def reduce_x(item, shapes):
-    return ghl.reduce_inputs(shapes, item["x"][:, -ghl.SCALARS:].astype(np.float32))
+    return ghl.reduce_inputs(shapes, ghl.tier_features(item["grid_ticks"], item["sustain_ticks"], shapes,
+                                                       tempo.RESOLUTION))
 
 
 def train(model, songs, val_songs, steps, batch, lr, device, loss_of, board, tag):
@@ -210,22 +225,19 @@ def timing_loss(device):
     return loss_of
 
 
-def snapped_notes(logits, times, grid, threshold) -> np.ndarray:
-    """Seconds of the picked notes after the 16th snap chart_tiers applies."""
-    ticks = sorted({grid.quantize(t, ghl.GRID) for t in ghl.pick_times(logits, times, threshold)})
-    return np.array([grid.beat_to_time(t / grid.resolution) for t in ticks])
+def picked_notes(logits, times, threshold) -> np.ndarray:
+    return times[ghl.pick_slots(logits, times, threshold)]
 
 
 def timing_threshold(timing_net, songs, extras, device) -> float:
     """The keep threshold at which the validation songs get as many picked
     notes as the official charts have."""
     logits = [ghl.windowed(timing_net, s["x"].astype(np.float32), device)[:, 0] for s in songs]
-    target = sum(len(official) for _, official, _ in extras)
+    target = sum(len(official) for _, _, official in extras)
     low, high = -8.0, 8.0
     for _ in range(20):
         middle = (low + high) / 2
-        count = sum(len(snapped_notes(lg, times, grid, middle))
-                    for lg, (times, _, grid) in zip(logits, extras, strict=True))
+        count = sum(len(picked_notes(lg, times, middle)) for lg, (_, times, _) in zip(logits, extras, strict=True))
         low, high = (middle, high) if count > target else (low, middle)
     return (low + high) / 2
 
@@ -240,9 +252,8 @@ def near(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def evaluate_timing(timing_net, songs, extras, device, threshold, board) -> None:
     hits = np.zeros(4)  # picked, picked near official, official, official near picked
-    for song, (times, official, grid) in zip(songs, extras, strict=True):
-        notes = snapped_notes(ghl.windowed(timing_net, song["x"].astype(np.float32), device)[:, 0],
-                              times, grid, threshold)
+    for song, (_, times, official) in zip(songs, extras, strict=True):
+        notes = picked_notes(ghl.windowed(timing_net, song["x"].astype(np.float32), device)[:, 0], times, threshold)
         hits += [len(notes), near(notes, official).sum(), len(official), near(official, notes).sum()]
     scores = {"timing_count": hits[0] / hits[2], "timing_precision": hits[1] / max(hits[0], 1),
               "timing_recall": hits[3] / max(hits[2], 1)}
@@ -390,7 +401,7 @@ def structure(shapes: np.ndarray):
     return np.minimum(np.bitwise_count(shapes), 3), row, np.sign(np.diff(column, append=np.nan))
 
 
-def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weights, board) -> None:
+def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weights, shares, board) -> None:
     shape_net.eval()
     reduce_net.eval()
     hits = np.zeros(5)  # exact, size, row, move, fretted pairs
@@ -404,7 +415,8 @@ def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weights, boar
         hits += structure_score(pred, song["shapes"])
         total += len(pred)
         out = ghl.windowed(reduce_net, reduce_x(song, song["shapes"]), device)
-        kept = out[..., 0] > 0
+        nested = ghl.nested_keep(out[..., 0], song["grid_ticks"], shares, tempo.RESOLUTION)
+        kept = np.stack([nested[tier] for tier in ghl.TIERS], 1)
         tier_pred = out[..., 1:].argmax(-1)
         truth = song["keep"] > 0
         tier_stats[:, 0] += (kept & truth).sum(0)
@@ -485,7 +497,7 @@ def main(argv=None):
     board.add_text("decode_weights", str(weights))
     threshold = timing_threshold(timing_net, *zip(*val_timing, strict=True), device)
     evaluate_timing(timing_net, *zip(*test_timing, strict=True), device, threshold, board)
-    evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weights, board)
+    evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weights, keep_share(train_songs), board)
     torch.save({"timing": {k: v.half() for k, v in timing_net.state_dict().items()},
                 "timing_threshold": threshold,
                 "shape": {k: v.half() for k, v in shape_net.state_dict().items()},

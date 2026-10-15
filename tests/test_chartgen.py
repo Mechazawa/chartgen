@@ -169,9 +169,12 @@ def test_write_chart_keeps_taps_and_solos_off_ghl_tiers():
     assert "480 = N 6 0" in five and "0 = E solo" in five and "1920 = E soloend" in five
 
 
-def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
-    """Lower tiers only drop Expert positions, and no tier emits a shape the
-    official charts never use there (Easy is white-row only)."""
+def test_ghl_tiers_follow_the_official_ladder_and_sustain_rules():
+    """Expert notes sit on grid slots at least GAP_S apart; each lower tier
+    is drawn from the one above it, up to the official share and never
+    closer than its minimum gap; no tier emits a shape the official charts
+    never use there (Easy is white-row only); and an Expert note with room
+    after it sustains up to the next note unless it is an open note."""
     import tempfile
 
     import torch
@@ -193,26 +196,46 @@ def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
         saved_path, ghl.MODEL_PATH = ghl.MODEL_PATH, path
         ghl._MODELS.clear()
         try:
-            expert = [(tick * RESOLUTION // 2, tick % 5, 0) for tick in range(300)]
-            events = [(0.5 + i * 0.25, 0.7 + i * 0.25, 40 + i % 24, 0.8) for i in range(300)]
+            events = [(0.5 + i * 0.5, 0.7 + i * 0.5, 40 + i % 24, 0.8) for i in range(150)]
             tempo = steady(n=200)
-            out = ghl.chart_tiers(expert, tempo, events, {"guitar": events})
+            out = ghl.chart_tiers(tempo, np.ones(4000, dtype=np.float32), events, {"guitar": events})
         finally:
             ghl.MODEL_PATH = saved_path
             ghl._MODELS.clear()
     expert_ticks = {t for t, _, _ in out["ExpertGHLGuitar"]}
-    # The mix and guitar onsets coincide, so each is one candidate, and all
-    # clear the threshold and the minimum gap.
-    assert expert_ticks == {tempo.quantize(start, 4) for start, *_ in events}
+    assert all(t % (RESOLUTION // ghl.SLOTS_PER_BEAT) == 0 for t in expert_ticks)
+    times = [tempo.beat_to_time(t / RESOLUTION) for t in sorted(expert_ticks)]
+    assert min(b - a for a, b in pairwise(times)) >= ghl.GAP_S - 1e-9
+    above = expert_ticks
     for tier, share in (("Hard", 0.75), ("Medium", 0.5), ("Easy", 0.35)):
         kept = {t for t, _, _ in out[f"{tier}GHLGuitar"]}
-        assert kept <= expert_ticks, tier
-        assert len(kept) == round(share * len(expert_ticks)), (tier, len(kept))
+        assert kept <= above, tier
+        assert 0 < len(kept) <= round(share * len(expert_ticks)), (tier, len(kept))
+        assert min(b - a for a, b in pairwise(sorted(kept))) >= ghl.TIER_MIN_GAP_BEATS[tier] * RESOLUTION
+        above = kept
+    expert = sorted({(t, sus) for t, _, sus in out["ExpertGHLGuitar"]})
+    opens = {t for t, lane, _ in out["ExpertGHLGuitar"] if lane == ghl.OPEN}
+    for (tick, sus), (nxt, _) in pairwise(expert):
+        room = tempo.beat_to_time(nxt / RESOLUTION) - tempo.beat_to_time(tick / RESOLUTION)
+        sustained = room >= ghl.SUSTAIN_GAP_S and tick not in opens
+        assert sus == (nxt - tick if sustained else 0), (tick, sus, nxt)
     assert {lane for _, lane, _ in out["EasyGHLGuitar"]} <= {0, 1, 2}
     medium_sizes = {}
     for tick, _, _ in out["MediumGHLGuitar"]:
         medium_sizes[tick] = medium_sizes.get(tick, 0) + 1
     assert max(medium_sizes.values(), default=0) <= 2
+
+
+def test_ghl_tier_sustains_run_to_the_tiers_next_note_when_it_is_far_enough():
+    from chartgen import ghl
+
+    ticks = np.array([0, 480, 960, 2880, 3360])
+    keep = np.array([True, False, True, True, True])
+    sustained = np.array([True, True, True, False, True])
+    out = ghl.sustains(ticks, keep, sustained, 2.0, RESOLUTION)
+    # 0 -> 960 is two beats; 960 -> 2880 four; 2880 is not sustained on
+    # Expert; the last kept note has no next note to run to.
+    assert out.tolist() == [960, 0, 1920, 0, 0]
 
 
 def test_write_chart_merges_lyrics_into_events_in_tick_order():

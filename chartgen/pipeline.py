@@ -800,7 +800,7 @@ def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
 
             mono = stemsmod.separate(str(audio), progress, backend="sw")
             stem_events = prominence.transcribe_stems(mono, stemsmod.SR) if mono else {}
-        ghl_tiers = ghl.chart_tiers(tiers["ExpertSingle"], tempo, bp_events, stem_events)
+        ghl_tiers = ghl.chart_tiers(tempo, ghl.onset_envelope(y, sr), bp_events, stem_events)
         if ghl_tiers:
             tiers |= ghl_tiers
             progress(f"      6-fret: {len(_group(ghl_tiers['ExpertGHLGuitar']))} Expert "
