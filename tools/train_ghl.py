@@ -28,12 +28,14 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from chartgen import ghl, tempo
+from tools.ghl_charts import load
 
 # The song.ini delay is where the chart meets the audio; transcribed onsets
 # only refine it, since on periodic music their mode can sit a beat away.
 OFFSET_REFINE_S, OFFSET_BIN_S = 0.05, 0.005
 MATCH_S = 0.05  # a picked note this close to an official one is a hit
 SLOT_MATCH_S = 0.035  # half the spacing of 12 slots a beat at 145 BPM
+DOWNBEAT_MATCH_S = 0.07
 HOLDOUT_SHARE = 0.1
 VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
@@ -75,14 +77,16 @@ def audio_offset(note_s: np.ndarray, events, delay_s: float) -> float:
 
 
 def beat_grid(record: dict) -> tempo.TempoMap:
-    beats, pickup = record["tempo"]
+    beats, pickup, *_ = record["tempo"]
     return tempo.TempoMap(beat_times=np.asarray(beats), resolution=tempo.RESOLUTION, pickup_beats=int(pickup))
 
 
 def song_arrays(record: dict, delay_s: float) -> dict:
     """Per official Expert position: features, shapes and the lower tiers'
     keep and shapes, plus its tick and sustain on the pipeline's own beat
-    grid, which is what the reduce inputs see at run time."""
+    grid, which is what the reduce inputs see at run time. "downbeat" is
+    a grid beat number in the 4-beat phase most official bar lines land
+    on, or None when none lands within DOWNBEAT_MATCH_S of a grid beat."""
     chart = record["chart"]
     expert = chart.tiers["Expert"]
     ticks = np.array([t for t, _, _ in expert])
@@ -104,7 +108,12 @@ def song_arrays(record: dict, delay_s: float) -> dict:
     grid = beat_grid(record)
     beats = np.array([grid.time_to_beat(t) for t in times])
     sustain_beats = np.array([grid.time_to_beat(t + sus) for t, sus in zip(times, sustain_s, strict=True)]) - beats
-    return {"x": x.astype(np.float16), "shapes": shapes, "keep": keep,
+    bars = np.array([chart.seconds(t) for t in chart.bar_lines(int(ticks.max()) + 1)]) + offset
+    k = np.clip(np.searchsorted(grid.beat_times, bars), 1, len(grid.beat_times) - 1)
+    nearest = np.where(np.abs(grid.beat_times[k] - bars) < np.abs(grid.beat_times[k - 1] - bars), k, k - 1)
+    votes = np.bincount(nearest[np.abs(grid.beat_times[nearest] - bars) <= DOWNBEAT_MATCH_S] % 4, minlength=4)
+    return {"downbeat": grid.pickup_beats + int(votes.argmax()) if votes.any() else None,
+            "x": x.astype(np.float16), "shapes": shapes, "keep": keep,
             "tier_shapes": tier_shapes, "offset": offset,
             "grid_ticks": (np.round(beats * ghl.GRID) * tempo.RESOLUTION // ghl.GRID).astype(np.int64),
             "sustain_ticks": np.round(sustain_beats * tempo.RESOLUTION).astype(np.int64)}
@@ -149,7 +158,7 @@ def stack(items, key, dtype):
 
 def reduce_x(item, shapes):
     return ghl.reduce_inputs(shapes, ghl.tier_features(item["grid_ticks"], item["sustain_ticks"], shapes,
-                                                       tempo.RESOLUTION))
+                                                       tempo.RESOLUTION, item["downbeat"]))
 
 
 def train(model, songs, val_songs, steps, batch, lr, device, loss_of, board, tag):
@@ -454,10 +463,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    folders = {p.parent.name: p.parent for p in args.charts.rglob("notes.mid")}
     records = {p.stem: pickle.loads(p.read_bytes()) for p in sorted(args.features.glob("*.pkl"))}
+    records = {name: r if r["chart"].time_signatures else r | {"chart": load(folders[name] / "notes.mid")}
+               for name, r in records.items()}
     keys = sorted({song_key(name) for name in records})
     holdout = set(random.Random(0).sample(keys, max(1, int(len(keys) * HOLDOUT_SHARE))))
-    folders = {p.parent.name: p.parent for p in args.charts.rglob("notes.mid")}
     songs = {name: song_arrays(record, ini_delay_s(folders[name])) for name, record in records.items()}
     timing = {name: timing_arrays(record, ini_delay_s(folders[name])) for name, record in records.items()}
     offsets = np.array([s["offset"] for s in songs.values()])

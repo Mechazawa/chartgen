@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import librosa
 import numpy as np
-from scipy.special import expit
+from scipy.special import expit, softmax
 
 RESOLUTION = 480  # ticks per beat; divisible by 4 (16ths) and 3 (triplets)
 # librosa's onset envelope peaks after the transient: beats tracked on it sat
@@ -30,6 +30,7 @@ class TempoMap:
     beat_times: np.ndarray  # detected beat positions, seconds
     resolution: int = RESOLUTION
     pickup_beats: int = 1  # beats between tick 0 and the first detected beat
+    downbeat_phase: int | None = None  # index in beat_times of the first downbeat; None when unknown
 
     @property
     def bpm(self) -> float:
@@ -157,19 +158,7 @@ def load(audio_path: str):
     return librosa.load(audio_path, mono=True)
 
 
-@functools.cache
-def _madmom():
-    """madmom's offline beat tracker, with its eight BLSTM networks stacked.
-
-    madmom runs the networks one after another, frame by frame in Python: 20 s
-    on a 3-minute song. They share one architecture, so stacking their weights
-    steps all eight, both directions, through each frame together. The
-    weights, features and DBN decoding are madmom's own.
-    """
-    from madmom.features.beats import DBNBeatTrackingProcessor, RNNBeatProcessor
-
-    features, ensemble = RNNBeatProcessor().processors
-    nets = ensemble.processors[0].processors
+def _stack(nets) -> tuple:
     layers = []
     for depth in range(len(nets[0].layers) - 1):
         lstms = [lstm for net in nets
@@ -180,14 +169,33 @@ def _madmom():
         peephole = np.stack([[lstm.input_gate.peephole_weights, lstm.forget_gate.peephole_weights,
                               lstm.output_gate.peephole_weights] for lstm in lstms])
         layers.append((*stacked, peephole))
-    head = (np.stack([net.layers[-1].weights for net in nets]),
-            np.stack([net.layers[-1].bias for net in nets]))
-    return features, layers, head, DBNBeatTrackingProcessor(fps=100)
+    return layers, (np.stack([net.layers[-1].weights for net in nets]),
+                    np.stack([net.layers[-1].bias for net in nets]))
 
 
-def _beat_activation(y44: np.ndarray) -> np.ndarray:
-    """Beat probability per 10 ms frame: the mean of madmom's eight networks."""
-    features, layers, (head_w, head_b), _ = _madmom()
+@functools.cache
+def _madmom():
+    """madmom's offline beat tracker and its downbeat networks, each
+    ensemble of eight BLSTMs stacked.
+
+    madmom runs the networks one after another, frame by frame in Python: 20 s
+    on a 3-minute song. They share one architecture, so stacking their weights
+    steps all eight, both directions, through each frame together. The
+    weights, features and DBN decoding are madmom's own.
+    """
+    from madmom.features.beats import DBNBeatTrackingProcessor, RNNBeatProcessor
+    from madmom.features.downbeats import RNNDownBeatProcessor
+
+    beat_features, beat_ensemble = RNNBeatProcessor().processors
+    downbeat_features, downbeat_ensemble, _ = RNNDownBeatProcessor().processors
+    return ((beat_features, *_stack(beat_ensemble.processors[0].processors)),
+            (downbeat_features, *_stack(downbeat_ensemble.processors[0].processors)),
+            DBNBeatTrackingProcessor(fps=100))
+
+
+def _logits(network, y44: np.ndarray) -> np.ndarray:
+    """[network, frame, output] head logits of a stacked ensemble, 10 ms frames."""
+    features, layers, (head_w, head_b) = network
     x = np.asarray(features(y44), dtype=np.float32)
     frames, n_nets = len(x), len(head_w)
     inputs = np.broadcast_to(x, (n_nets, *x.shape))
@@ -210,7 +218,20 @@ def _beat_activation(y44: np.ndarray) -> np.ndarray:
         out = out.reshape(frames, n_nets, 2, hidden)
         out[:, :, 1] = out[::-1, :, 1]
         inputs = out.transpose(1, 0, 2, 3).reshape(n_nets, frames, 2 * hidden)
-    return expit(np.matmul(inputs, head_w) + head_b[:, None]).mean(axis=0)[:, 0]
+    return np.matmul(inputs, head_w) + head_b[:, None]
+
+
+def _downbeat_phase(beats: np.ndarray, y44: np.ndarray) -> int | None:
+    """Index among the first four beats of the first downbeat: the phase
+    whose every fourth beat carries the most downbeat probability. One
+    phase per song: on the official charts a full downbeat track does not
+    improve the lower tiers over it."""
+    if len(beats) < 4:
+        return None
+    downbeat = softmax(_logits(_madmom()[1], y44), axis=-1).mean(axis=0)[:, 2]
+    frames = np.round(beats * 100).astype(int)
+    at_beat = np.max([downbeat[np.clip(frames + d, 0, len(downbeat) - 1)] for d in (-1, 0, 1)], axis=0)
+    return int(np.argmax([at_beat[p::4].mean() for p in range(4)]))
 
 
 def _smooth(beats: np.ndarray, half: int = SMOOTH_NEIGHBOURS) -> np.ndarray:
@@ -260,7 +281,8 @@ def detect(y, sr, resolution: int = RESOLUTION, bpm_mult: str = "1") -> TempoMap
     -1.5 ms), so they get no shift.
     """
     y44 = y if sr == TRACKER_SR else librosa.resample(y, orig_sr=sr, target_sr=TRACKER_SR)
-    beats = np.asarray(_madmom()[3](_beat_activation(y44)), dtype=float)
+    beat_net, _, tracker = _madmom()
+    beats = np.asarray(tracker(expit(_logits(beat_net, y44)).mean(axis=0)[:, 0]), dtype=float)
     if len(beats) < 2:
         raise ValueError("could not detect a beat grid in this audio")
     beats = _smooth(beats)
@@ -272,4 +294,5 @@ def detect(y, sr, resolution: int = RESOLUTION, bpm_mult: str = "1") -> TempoMap
 
     beat_dur = float(np.median(np.diff(beats)))
     pickup = max(1, int(round(beats[0] / beat_dur))) if beats[0] > 0.02 else 0
-    return TempoMap(beat_times=beats, resolution=resolution, pickup_beats=pickup)
+    return TempoMap(beat_times=beats, resolution=resolution, pickup_beats=pickup,
+                    downbeat_phase=_downbeat_phase(beats, y44))

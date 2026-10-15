@@ -790,20 +790,53 @@ def test_click_tracks_come_out_at_their_tempo_and_on_the_clicks():
         assert error.max() < 0.02, (bpm, error.max())
 
 
-def test_stacked_beat_networks_match_madmom():
-    """_beat_activation reimplements madmom's network loop; it must give the
-    activation madmom's own processor gives."""
+def test_stacked_networks_match_madmom():
+    """_logits reimplements madmom's network loop; the beat and downbeat
+    activations must be the ones madmom's own processors give."""
     import librosa
     from madmom.features.beats import RNNBeatProcessor
+    from madmom.features.downbeats import RNNDownBeatProcessor
+    from scipy.special import expit, softmax
 
-    from chartgen.tempo import TRACKER_SR, _beat_activation
+    from chartgen.tempo import TRACKER_SR, _logits, _madmom
 
     y, sr, _ = _click_track(97.0, 6.0)
     y += 0.05 * np.sin(2 * np.pi * 220 * np.arange(len(y)) / sr).astype(np.float32)
     y44 = librosa.resample(y, orig_sr=sr, target_sr=TRACKER_SR)
-    ours, theirs = _beat_activation(y44), RNNBeatProcessor()(y44)
-    assert ours.shape == theirs.shape
-    assert np.abs(ours - theirs).max() < 1e-3, np.abs(ours - theirs).max()
+    beat_net, downbeat_net, _ = _madmom()
+    for ours, theirs in ((expit(_logits(beat_net, y44)).mean(axis=0)[:, 0], RNNBeatProcessor()(y44)),
+                         (softmax(_logits(downbeat_net, y44), axis=-1).mean(axis=0)[:, 1:],
+                          RNNDownBeatProcessor()(y44))):
+        assert ours.shape == theirs.shape
+        assert np.abs(ours - theirs).max() < 1e-3, np.abs(ours - theirs).max()
+
+
+def test_downbeat_phase_follows_the_kick_on_beat_one():
+    from chartgen.tempo import detect
+
+    y, sr, clicks = _click_track(100.0, 20.0)
+    kick_t = np.arange(int(0.25 * sr)) / sr
+    kick = (np.sin(2 * np.pi * (50 * kick_t + 18 * (1 - np.exp(-kick_t / 0.03))))
+            * np.exp(-kick_t / 0.12)).astype(np.float32)
+    for first in (1, 2):
+        accented = y.copy()
+        for click in clicks[first::4]:
+            at = int(click * sr)
+            accented[at:at + len(kick)] += kick[:len(accented) - at]
+        found = detect(accented, sr)
+        assert found.downbeat_phase == int(np.argmin(np.abs(found.beat_times - clicks[first]))) % 4, first
+
+
+def test_tier_features_place_a_tick_in_its_bar():
+    from chartgen import ghl
+
+    ticks = np.array([0, 5 * RESOLUTION, 6 * RESOLUTION + RESOLUTION // 2])
+    flat = np.zeros(3, dtype=np.int64)
+    bar = ghl.tier_features(ticks, flat, np.array([1, 2, 4]), RESOLUTION, downbeat=5)[:, -5:]
+    assert bar[:, :4].argmax(1).tolist() == [3, 0, 1]
+    assert np.allclose(bar[:, 4], [0.75, 0.0, 0.375])
+    unknown = ghl.tier_features(ticks, flat, np.array([1, 2, 4]), RESOLUTION, downbeat=None)
+    assert unknown.shape == (3, ghl.TIER_FEATURES) and not unknown[:, -5:].any()
 
 
 def test_sixteenth_grid_stays_inside_the_natural_hopo_window():

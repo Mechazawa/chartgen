@@ -10,10 +10,11 @@ GhlChart}, where events are [(start_s, end_s, midi, amplitude)].
 Separation holds the GPU, so one process runs it song by song while a
 thread loads the next song's audio and Basic Pitch transcribes the previous
 songs' streams in CPU worker processes. Each record also holds the beat
-grid the pipeline detects ("tempo": (beat_times, pickup_beats)) and the
-mix's onset envelope ("onset_env", chartgen.ghl.onset_envelope); a record
-without them gets them added on the next run, so deleting those keys
-refreshes them after a change to either detector.
+grid the pipeline detects ("tempo": (beat_times, pickup_beats,
+downbeat_phase)) and the mix's onset envelope ("onset_env",
+chartgen.ghl.onset_envelope); a record without them gets them added on
+the next run, so deleting those keys refreshes them after a change to
+either detector.
 
     python -m tools.build_ghl_dataset data/ghl-official -o data/ghl-features
 """
@@ -50,7 +51,7 @@ def mix(folder: Path) -> np.ndarray:
 
 def beat_grid(audio: np.ndarray) -> tuple:
     found = tempo.detect(audio, stems.SR)
-    return found.beat_times, found.pickup_beats
+    return found.beat_times, found.pickup_beats, found.downbeat_phase
 
 
 def audio_keys(audio: np.ndarray) -> dict:

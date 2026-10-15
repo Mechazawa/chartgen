@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import mido
+import numpy as np
 
 TRACK = "PART GUITAR GHL"
 # Per difficulty the base note is open, then W1 W2 W3 B1 B2 B3 above it.
@@ -30,6 +31,8 @@ class GhlChart:
     tempo: list[tuple[int, int]]  # (tick, microseconds per beat)
     tiers: dict[str, list[tuple[int, Shape, int]]]
     sections: tuple[tuple[int, str], ...] = ()  # (tick, name) from the EVENTS track
+    # (tick, numerator, denominator); None on a chart pickled before they were read
+    time_signatures: tuple[tuple[int, int, int], ...] | None = None
 
     def seconds(self, tick: int) -> float:
         elapsed, last_tick, last_tempo = 0.0, 0, 500_000
@@ -40,6 +43,12 @@ class GhlChart:
             last_tick, last_tempo = change_tick, tempo
         return elapsed + (tick - last_tick) * last_tempo / self.resolution / 1e6
 
+    def bar_lines(self, end: int) -> list[int]:
+        """Tick of every official bar line before end."""
+        bounds = [t for t, _, _ in self.time_signatures[1:]] + [end]
+        return [round(tick) for (start, num, den), stop in zip(self.time_signatures, bounds, strict=True)
+                for tick in np.arange(start, stop, num * 4 / den * self.resolution)]
+
 
 def load(mid_path: Path) -> GhlChart | None:
     mid = mido.MidiFile(str(mid_path), clip=True)
@@ -49,6 +58,8 @@ def load(mid_path: Path) -> GhlChart | None:
 
     tempo = sorted({tick: msg.tempo for tick, msg in _absolute(mid.tracks[0])
                     if msg.type == "set_tempo"}.items())
+    signatures = tuple(sorted({tick: (tick, msg.numerator, msg.denominator) for tick, msg in _absolute(mid.tracks[0])
+                               if msg.type == "time_signature"}.values()))
     pressed: dict[int, int] = {}
     hits: dict[str, dict[int, tuple[set[int], int]]] = {d: {} for d in DIFF_BASE}
     for tick, msg in _absolute(track):
@@ -73,7 +84,7 @@ def load(mid_path: Path) -> GhlChart | None:
     sections = tuple((tick, found.group(1).strip()) for track in mid.tracks if track.name == "EVENTS"
                      for tick, msg in _absolute(track)
                      if msg.type == "text" and (found := re.fullmatch(r"\[section (.+)\]", msg.text.strip())))
-    return GhlChart(mid.ticks_per_beat, tempo or [(0, 500_000)], tiers, sections)
+    return GhlChart(mid.ticks_per_beat, tempo or [(0, 500_000)], tiers, sections, signatures or ((0, 4, 4),))
 
 
 def _absolute(track):

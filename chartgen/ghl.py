@@ -48,7 +48,7 @@ SUSTAIN_GAP_S = 0.3
 # this many beats away, and never places two notes closer than its gap.
 TIER_SUSTAIN_BEATS = {"Hard": 1.0, "Medium": 2.0, "Easy": 2.25}
 TIER_MIN_GAP_BEATS = {"Hard": 1 / 12, "Medium": 0.2, "Easy": 1 / 3}
-TIER_FEATURES = 20
+TIER_FEATURES = 25
 
 
 def shape_class(lanes) -> int:
@@ -296,11 +296,14 @@ class TimingNet(nn.Module):
         return self.head(self.encoder(x, pad))
 
 
-def tier_features(ticks: np.ndarray, sustain: np.ndarray, shapes: np.ndarray, res: int) -> np.ndarray:
+def tier_features(ticks: np.ndarray, sustain: np.ndarray, shapes: np.ndarray, res: int,
+                  downbeat: int | None) -> np.ndarray:
     """[N, TIER_FEATURES] per Expert position, from the chart alone: its
     16th within the beat, the gaps to the two notes either side in beats,
-    its sustain, chord size, row and repeat, and its neighbours' size and
-    whether they sit on the beat."""
+    its sustain, chord size, row and repeat, its neighbours' size and
+    whether they sit on the beat, and its beat in a 4/4 bar counted from
+    downbeat (the beat number of any downbeat). Without a downbeat the bar
+    columns are zero: bars counted from tick 0 place notes worse than none."""
     beat = ticks / res
     sixteenth = np.round(beat * 4)
     phase = np.eye(4, dtype=np.float32)[(sixteenth % 4).astype(int)]
@@ -320,10 +323,13 @@ def tier_features(ticks: np.ndarray, sustain: np.ndarray, shapes: np.ndarray, re
     size = np.minimum(np.bitwise_count(shapes), 3).astype(np.float32)
     row = np.array([3 if not s else 0 if s < 8 else 1 if not s & 7 else 2 for s in shapes])
     on_beat = (sixteenth % 4 == 0).astype(np.float32)
+    in_bar = (beat - (downbeat or 0)) % 4
+    bar = np.column_stack([np.eye(4)[in_bar.astype(int)], in_bar / 4]) * (downbeat is not None)
     columns = [*phase.T, off_grid, np.log1p(before), np.log1p(after), np.log1p(shifted(before, 1, 4.0)),
                np.log1p(shifted(after, -1, 4.0)), np.log1p(sustain / res), size / 3,
                *np.eye(4, dtype=np.float32)[row].T, shifted(shapes, 1, -1) == shapes,
-               shifted(size, 1, 0) / 3, shifted(size, -1, 0) / 3, shifted(on_beat, 1, 0), shifted(on_beat, -1, 0)]
+               shifted(size, 1, 0) / 3, shifted(size, -1, 0) / 3, shifted(on_beat, 1, 0), shifted(on_beat, -1, 0),
+               *bar.T]
     return np.stack(columns, 1).astype(np.float32)
 
 
@@ -428,7 +434,9 @@ def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
                      allowed["Expert"], *saved["decode_weights"])
     sustained &= shapes != 0
     expert_sustain[~sustained] = 0
-    reduced = windowed(reduce_net, reduce_inputs(shapes, tier_features(ticks, expert_sustain, shapes, res)), device)
+    downbeat = None if tempo.downbeat_phase is None else tempo.pickup_beats + tempo.downbeat_phase
+    tier_x = tier_features(ticks, expert_sustain, shapes, res, downbeat)
+    reduced = windowed(reduce_net, reduce_inputs(shapes, tier_x), device)
 
     def notes(keep, tier_shapes, tier_sustain):
         return [(int(t), lane, int(sus)) for t, k, s, sus in zip(ticks, keep, tier_shapes, tier_sustain, strict=True)
