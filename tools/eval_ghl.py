@@ -3,14 +3,22 @@ songs the GHL model held out from training.
 
 Each song's audio is mixed as in tools/build_ghl_dataset.py and charted by
 the full pipeline. Positions match within MATCH_S after the song.ini delay;
-shapes are then compared on the matched positions.
+shapes and sustains are then compared on the matched positions, next to the
+official shapes shuffled over the official positions (chance). The Expert
+tier is also scored in seconds against the population of official training
+charts (z of each style statistic), and each chart's repeated sections are
+scored against each other.
 
     python -m tools.eval_ghl --charts data/ghl-official -n 10
 """
 import argparse
+import itertools
+import json
+import pickle
 import re
 import sys
 import tempfile
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -21,15 +29,18 @@ from chartgen import ghl, stems
 from chartgen.__main__ import build_args
 from chartgen import pipeline
 from tools.build_ghl_dataset import mix
-from tools.ghl_charts import DIFF_BASE, load
+from tools.ghl_charts import DIFF_BASE, GhlChart, load
 from tools.train_ghl import ini_delay_s, song_key
 
 MATCH_S = 0.05
 DIFFS = tuple(DIFF_BASE)
+SHUFFLES = 20
+FLAG_Z = 2.0
+SHAPE_KEYS = ("exact", "size", "row", "direction")
 
 
-def read_ghl(chart_text: str) -> dict[str, list[tuple[float, frozenset]]]:
-    """{difficulty: [(seconds, shape)]} from a written notes.chart."""
+def read_ghl(chart_text: str) -> dict[str, list[tuple[float, frozenset, float]]]:
+    """{difficulty: [(seconds, shape, sustain seconds)]} from a written notes.chart."""
     res = int(re.search(r"Resolution = (\d+)", chart_text).group(1))
     sync = re.search(r"\[SyncTrack\]\s*\{(.*?)\}", chart_text, re.S).group(1)
     bpms = [(int(t), int(b) / 1000) for t, b in re.findall(r"(\d+) = B (\d+)", sync)]
@@ -47,14 +58,22 @@ def read_ghl(chart_text: str) -> dict[str, list[tuple[float, frozenset]]]:
     out = {}
     for diff in DIFFS:
         block = re.search(rf"\[{diff}GHLGuitar\]\s*\{{(.*?)\}}", chart_text, re.S)
-        shapes: dict[int, set] = {}
-        for tick, number in re.findall(r"(\d+) = N (\d+) \d+", block.group(1) if block else ""):
-            if int(number) in lanes or int(number) == 7:
-                shapes.setdefault(int(tick), set())
-                if int(number) in lanes:
-                    shapes[int(tick)].add(lanes[int(number)])
-        out[diff] = [(seconds(t), frozenset(s)) for t, s in sorted(shapes.items())]
+        notes: dict[int, tuple[set, int]] = {}
+        for tick, number, length in re.findall(r"(\d+) = N (\d+) (\d+)", block.group(1) if block else ""):
+            tick, number, length = int(tick), int(number), int(length)
+            if number in lanes or number == 7:
+                buttons, sustain = notes.setdefault(tick, (set(), 0))
+                if number in lanes:
+                    buttons.add(lanes[number])
+                notes[tick] = (buttons, max(sustain, length))
+        out[diff] = [(seconds(t), frozenset(b), seconds(t + n) - seconds(t))
+                     for t, (b, n) in sorted(notes.items())]
     return out
+
+
+def timed(chart: GhlChart, diff: str, delay: float = 0.0) -> list[tuple[float, frozenset, float]]:
+    return [(chart.seconds(t) + delay, s, chart.seconds(t + n) - chart.seconds(t))
+            for t, s, n in chart.tiers[diff]]
 
 
 def column(shape) -> float:
@@ -62,36 +81,130 @@ def column(shape) -> float:
 
 
 def score(ours, theirs) -> dict:
-    """Greedy one-to-one matching in time order, then shape agreement."""
-    their_s = np.array([s for s, _ in theirs])
+    """Greedy one-to-one matching in time order, then shape and sustain agreement."""
+    their_s = np.array([s for s, *_ in theirs])
     used = np.zeros(len(theirs), bool)
     pairs = []
-    for s, shape in ours:
+    for s, shape, sustain in ours:
         j = int(np.searchsorted(their_s, s))
         best = min((k for k in (j - 1, j) if 0 <= k < len(theirs) and not used[k]),
                    key=lambda k: abs(their_s[k] - s), default=None)
         if best is not None and abs(their_s[best] - s) <= MATCH_S:
             used[best] = True
-            pairs.append((shape, theirs[best][1]))
+            pairs.append((shape, theirs[best][1], sustain > 0, theirs[best][2] > 0))
     moves = [(np.sign(column(a2) - column(a1)), np.sign(column(b2) - column(b1)))
-             for (a1, b1), (a2, b2) in zip(pairs, pairs[1:], strict=False)]
+             for (a1, b1, *_), (a2, b2, *_) in zip(pairs, pairs[1:], strict=False)]
     return {"ours": len(ours), "theirs": len(theirs), "matched": len(pairs),
-            "exact": sum(a == b for a, b in pairs),
-            "size": sum(len(a) == len(b) for a, b in pairs),
-            "row": sum((min(a, default=-1) >= 3) == (min(b, default=-1) >= 3) for a, b in pairs),
-            "direction": sum(a == b for a, b in moves), "moves": len(moves)}
+            "exact": sum(a == b for a, b, *_ in pairs),
+            "size": sum(len(a) == len(b) for a, b, *_ in pairs),
+            "row": sum((min(a, default=-1) >= 3) == (min(b, default=-1) >= 3) for a, b, *_ in pairs),
+            "direction": sum(a == b for a, b in moves), "moves": len(moves),
+            "sustained": sum(x and y for *_, x, y in pairs),
+            "ours_sustained": sum(x for *_, x, _ in pairs),
+            "theirs_sustained": sum(y for *_, y in pairs)}
+
+
+def chance(theirs) -> dict:
+    """Mean score of the official shapes shuffled over the official positions."""
+    rng = np.random.default_rng(0)
+    runs = [score([(s, theirs[k][1], n) for (s, _, n), k in zip(theirs, rng.permutation(len(theirs)), strict=True)],
+                  theirs) for _ in range(SHUFFLES)]
+    return {key: float(np.mean([r[key] for r in runs])) for key in runs[0]}
+
+
+def panel(notes) -> dict[str, float]:
+    """Style statistics of one tier from seconds only, so a different tempo grid cannot move them."""
+    shapes = [shape for _, shape, _ in notes]
+    share = np.array(list(Counter(shapes).values())) / len(shapes)
+    return {"density": (len(notes) - 1) / max(notes[-1][0] - notes[0][0], 1e-9),
+            "single": float(np.mean([len(s) == 1 for s in shapes])),
+            "two": float(np.mean([len(s) == 2 for s in shapes])),
+            "white": float(np.mean([bool(s) and max(s) < 3 for s in shapes])),
+            "mixed": float(np.mean([bool(s) and min(s) < 3 <= max(s) for s in shapes])),
+            "repeat": float(np.mean([a == b for a, b in zip(shapes, shapes[1:], strict=False)])),
+            "sustain": float(np.mean([n > 0 for *_, n in notes])),
+            "entropy": float(-(share * np.log2(share)).sum())}
+
+
+def population(features: Path, stats_path: Path, holdout: set[str]) -> dict:
+    """Mean and sd of the Expert panel over the official training charts, one chart per song key."""
+    if stats_path.exists():
+        return json.loads(stats_path.read_text())
+    seen, rows = set(), []
+    for path in sorted(features.glob("*.pkl")):
+        key = song_key(path.stem)
+        if key not in holdout and key not in seen:
+            seen.add(key)
+            rows.append(panel(timed(pickle.loads(path.read_bytes())["chart"], "Expert")))
+    stats = {"songs": len(rows),
+             "mean": {k: float(np.mean([r[k] for r in rows])) for k in rows[0]},
+             "sd": {k: float(np.std([r[k] for r in rows])) for k in rows[0]}}
+    stats_path.write_text(json.dumps(stats, indent=1))
+    return stats
+
+
+def zscores(notes, stats) -> dict[str, float]:
+    return {k: (v - stats["mean"][k]) / max(stats["sd"][k], 1e-9) for k, v in panel(notes).items()}
+
+
+def repeats(chart: GhlChart, delay: float) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Pairs of same-named sections (numbers ignored) of equal tick length, as spans in seconds."""
+    groups = defaultdict(list)
+    for (start, name), (end, _) in zip(chart.sections, chart.sections[1:], strict=False):
+        key = (" ".join(re.sub(r"\d+", "", name).split()).lower(), end - start)
+        groups[key].append((chart.seconds(start) + delay, chart.seconds(end) + delay))
+    return [pair for spans in groups.values() for pair in itertools.combinations(spans, 2)]
+
+
+def self_precision(notes, pairs) -> list[float]:
+    """Per section pair, the share of the later repeat's notes that the earlier repeat also has."""
+    def window(span):
+        return [(s - span[0], shape, n) for s, shape, n in notes if span[0] <= s < span[1]]
+    out = []
+    for first, later in pairs:
+        stats = score(window(later), window(first))
+        if stats["ours"]:
+            out.append(stats["matched"] / stats["ours"])
+    return out
 
 
 def violations(tiers) -> list[str]:
     out = []
-    if any(b >= 3 for _, s in tiers["Easy"] for b in s):
+    if any(b >= 3 for _, s, _ in tiers["Easy"] for b in s):
         out.append("Easy uses the black row")
-    if any(len(s) > 2 for _, s in tiers["Medium"]):
+    if any(len(s) > 2 for _, s, _ in tiers["Medium"]):
         out.append("Medium has 3-button chords")
-    expert = {round(s, 3) for s, _ in tiers["Expert"]}
-    if any(round(s, 3) not in expert for d in DIFFS[1:] for s, _ in tiers[d]):
+    expert = {round(s, 3) for s, *_ in tiers["Expert"]}
+    if any(round(s, 3) not in expert for d in DIFFS[1:] for s, *_ in tiers[d]):
         out.append("a lower tier has a position Expert lacks")
     return out
+
+
+def rates(t: dict) -> dict[str, float]:
+    m = max(t.get("matched", 0), 1)
+    return {"exact": t["exact"] / m, "size": t["size"] / m, "row": t["row"] / m,
+            "direction": t["direction"] / max(t["moves"], 1)}
+
+
+def versus(got: dict, base: dict) -> str:
+    ours, luck = rates(got), rates(base)
+    return ", ".join(f"{k} {ours[k]:.0%} chance {luck[k]:.0%} ({(ours[k] - luck[k]) * 100:+.0f})"
+                     for k in SHAPE_KEYS)
+
+
+def sustain_pr(t: dict) -> str:
+    return (f"sustain precision {t['sustained'] / max(t['ours_sustained'], 1):.0%} "
+            f"recall {t['sustained'] / max(t['theirs_sustained'], 1):.0%}")
+
+
+def median(values) -> str:
+    return f"{np.median(values):.0%}" if values else "n/a"
+
+
+def zline(z: dict[str, dict[str, float]]) -> str:
+    def cell(value):
+        return f"{value:+.1f}{'*' if abs(value) > FLAG_Z else ''}"
+    return " ".join(f"{k} {cell(z['chartgen'][k])}/{cell(z['official'][k])}" for k in z["chartgen"])
 
 
 def main(argv=None):
@@ -99,12 +212,19 @@ def main(argv=None):
     ap.add_argument("--charts", type=Path, default=Path("data/ghl-official"))
     ap.add_argument("-n", type=int, default=10, help="holdout songs to chart")
     ap.add_argument("--out", type=Path, default=Path("data/ghl-eval"))
+    ap.add_argument("--features", type=Path, default=Path("data/ghl-features"),
+                    help="official records the style population is built from")
+    ap.add_argument("--stats", type=Path, default=Path("data/ghl-eval-stats.json"),
+                    help="cached style population; built from --features when missing")
     args = ap.parse_args(argv)
 
     holdout = set(torch.load(ghl.MODEL_PATH, map_location="cpu")["holdout"])
+    population_stats = population(args.features, args.stats, holdout)
     folders = sorted(p.parent for p in args.charts.rglob("notes.mid")
                      if song_key(p.parent.name) in holdout)[:args.n]
     totals = {d: {} for d in DIFFS}
+    flags = {"chartgen": [], "official": []}
+    consistency = {"chartgen": [], "official": []}
     for folder in folders:
         official = load(folder / "notes.mid")
         delay = ini_delay_s(folder)
@@ -116,17 +236,30 @@ def main(argv=None):
             opts.audio = str(audio)
             result = pipeline.run(opts, progress=lambda m: None)
         ours = read_ghl((result["song_dir"] / "notes.chart").read_text())
-        theirs = {d: [(official.seconds(t) + delay, s) for t, s, _ in official.tiers[d]]
-                  for d in DIFFS}
+        theirs = {d: timed(official, d, delay) for d in DIFFS}
         problems = violations(ours)
-        line = []
+        line, details = [], []
         for d in DIFFS:
-            stats = score(ours[d], theirs[d])
-            for key, value in stats.items():
+            got, base = score(ours[d], theirs[d]), chance(theirs[d])
+            for key, value in got.items():
                 totals[d][key] = totals[d].get(key, 0) + value
-            line.append(f"{d[0]} {stats['ours']}/{stats['theirs']}")
-        print(f"{folder.name[:44]:44s} {' '.join(line)} {'; '.join(problems) or 'rules ok'}",
-              flush=True)
+                totals[d]["chance " + key] = totals[d].get("chance " + key, 0) + base[key]
+            line.append(f"{d[0]} {got['ours']}/{got['theirs']}")
+            details.append(f"  {d:6s} {versus(got, base)}; {sustain_pr(got)}")
+        print(f"{folder.name[:44]:44s} {' '.join(line)} {'; '.join(problems) or 'rules ok'}")
+        print("\n".join(details))
+        z = {"chartgen": zscores(ours["Expert"], population_stats),
+             "official": zscores(theirs["Expert"], population_stats)}
+        for who in flags:
+            flags[who].append(sum(abs(v) > FLAG_Z for v in z[who].values()))
+        print(f"  style z chartgen/official: {zline(z)}")
+        pairs = repeats(official, delay)
+        own = {"chartgen": self_precision(ours["Expert"], pairs),
+               "official": self_precision(theirs["Expert"], pairs)}
+        for who in consistency:
+            consistency[who] += own[who]
+        print(f"  repeats ({len(pairs)} section pairs) median precision "
+              f"chartgen {median(own['chartgen'])} official {median(own['official'])}", flush=True)
 
     print()
     for d in DIFFS:
@@ -136,6 +269,14 @@ def main(argv=None):
               f"precision {t['matched'] / max(t['ours'], 1):.0%} recall {t['matched'] / max(t['theirs'], 1):.0%}; "
               f"on matches: exact {t['exact'] / m:.0%}, size {t['size'] / m:.0%}, "
               f"row {t['row'] / m:.0%}, direction {t['direction'] / max(t['moves'], 1):.0%}")
+        base = {k.removeprefix("chance "): v for k, v in t.items() if k.startswith("chance ")}
+        print(f"       {versus(t, base)}; {sustain_pr(t)}")
+    songs = max(len(flags["chartgen"]), 1)
+    print(f"style flags (Expert, |z| > {FLAG_Z:g} against {population_stats['songs']} official training songs): "
+          + "; ".join(f"{who} >= 1 {sum(n >= 1 for n in counts) / songs:.0%}, "
+                      f">= 2 {sum(n >= 2 for n in counts) / songs:.0%}" for who, counts in flags.items()))
+    print(f"repeats ({len(consistency['official'])} section pairs) median precision "
+          f"chartgen {median(consistency['chartgen'])} official {median(consistency['official'])}")
     return 0
 
 

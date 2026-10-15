@@ -6,6 +6,7 @@ A shape is every button struck on one tick, so a chord is one entry.
     chart = load(Path(".../notes.mid"))
     chart.tiers["Expert"]  # [(tick, frozenset({0, 3}), sustain), ...]
 """
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,7 @@ class GhlChart:
     resolution: int
     tempo: list[tuple[int, int]]  # (tick, microseconds per beat)
     tiers: dict[str, list[tuple[int, Shape, int]]]
+    sections: tuple[tuple[int, str], ...] = ()  # (tick, name) from the EVENTS track
 
     def seconds(self, tick: int) -> float:
         elapsed, last_tick, last_tempo = 0.0, 0, 500_000
@@ -68,7 +70,10 @@ def load(mid_path: Path) -> GhlChart | None:
     tiers = {diff: [(tick, frozenset(buttons), sustain if sustain >= cutoff else 0)
                     for tick, (buttons, sustain) in sorted(by_tick.items())]
              for diff, by_tick in hits.items()}
-    return GhlChart(mid.ticks_per_beat, tempo or [(0, 500_000)], tiers)
+    sections = tuple((tick, found.group(1).strip()) for track in mid.tracks if track.name == "EVENTS"
+                     for tick, msg in _absolute(track)
+                     if msg.type == "text" and (found := re.fullmatch(r"\[section (.+)\]", msg.text.strip())))
+    return GhlChart(mid.ticks_per_beat, tempo or [(0, 500_000)], tiers, sections)
 
 
 def _absolute(track):
