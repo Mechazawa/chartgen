@@ -47,7 +47,7 @@ def mix(folder: Path) -> np.ndarray:
 
 
 def beat_grid(audio: np.ndarray) -> tuple:
-    found = tempo.detect(librosa.resample(audio, orig_sr=stems.SR, target_sr=22050), 22050)
+    found = tempo.detect(audio, stems.SR)
     return found.beat_times, found.pickup_beats
 
 

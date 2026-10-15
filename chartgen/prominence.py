@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .tempo import BEAT_LAG_S
+from .tempo import ONSET_LAG_S
 
 STEMS = ("vocals", "bass", "guitar", "piano", "sw_other")
 FEATS = ("energy", "loudness", "density", "pitch", "mono")
@@ -440,7 +440,7 @@ def rhythm_rescue(expert, followed, mono, sr, tempo):
         delta = RESCUE_ONSET_DELTA_GUITAR if stem == "guitar" else RESCUE_ONSET_DELTA
         frames = librosa.onset.onset_detect(onset_envelope=env, sr=sr, units="frames",
                                             delta=delta, backtrack=False)
-        peaks[stem] = (librosa.frames_to_time(frames, sr=sr) - BEAT_LAG_S, env[frames])
+        peaks[stem] = (librosa.frames_to_time(frames, sr=sr) - ONSET_LAG_S, env[frames])
     # chord shapes already on the chart, for voicing guitar onsets
     chord_at = {}
     for t, l, _ in expert:

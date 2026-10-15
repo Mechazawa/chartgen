@@ -137,8 +137,9 @@ from a human chart in the song list.
 
 chartgen is MIT licensed. It builds on Basic Pitch (Apache-2.0),
 bs-roformer-infer and Demucs (MIT), faster-whisper (MIT), yt-dlp (Unlicense),
-librosa (ISC) and PyTorch (BSD); the full pinned list is in
-`requirements.txt`. Model weights are downloaded from their own sources at
+librosa (ISC), madmom (BSD) and PyTorch (BSD); the full pinned list is in
+`requirements.txt` and `scripts/install.sh`. madmom's beat-tracking models are
+CC BY-NC-SA 4.0, so they are for non-commercial use only. Model weights are downloaded from their own sources at
 first run and are not redistributed here.
 
 Generated charts are derivative of copyrighted recordings. This is a tool for

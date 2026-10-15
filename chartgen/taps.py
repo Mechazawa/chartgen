@@ -24,7 +24,7 @@ from itertools import pairwise
 
 import numpy as np
 
-from .tempo import BEAT_LAG_S
+from .tempo import ONSET_LAG_S
 
 # Softness blend. The 24-song library sweep favoured brightness; the
 # 232-song genre-balanced re-sweep flipped it - attack edges out
@@ -118,7 +118,7 @@ def softness_by_tick(notes, y, sr, tempo) -> dict[int, float]:
     for tick in ticks:
         when = tempo.beat_to_time(tick / res)
         raw[tick] = {
-            "attack": _samples(onset, times - BEAT_LAG_S, when),
+            "attack": _samples(onset, times - ONSET_LAG_S, when),
             "bright": _samples(centroid, times, when),
             "loud": _samples(rms, times, when),
         }

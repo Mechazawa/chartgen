@@ -3,6 +3,7 @@
 ## Environment
 - Linux only. `scripts/install.sh` builds `.venv` (CUDA torch when `nvidia-smi` works).
 - Tests: `.venv/bin/python -m tests.test_chartgen` and `.venv/bin/python -m tests.test_motifs`. There is no linter config.
+- madmom 0.16.1 on PyPI does not build on Python 3.14. `scripts/install.sh` installs cython, then a pinned madmom git commit with `--no-build-isolation --no-deps`. The venv may have no pip (uv-built): use `uv pip install --python .venv/bin/python`.
 - Kill background jobs by PID (`ps -eo pid,comm,args | awk '$2 ~ /python/ ...'`). `pkill -f <pattern>` also matches the shell that runs it.
 
 ## 6-fret (GHL) part
@@ -15,7 +16,7 @@
   3. `python -m tools.train_ghl data/ghl-features --sweep 16` trains the three models (16 random configurations each, best validation loss wins) and records the configuration and the held-out songs in the model file. Curves: `tensorboard --logdir data/ghl-runs --host 127.0.0.1`.
   4. `python -m tools.eval_ghl -n 10` charts held-out songs end to end and scores the 6-fret part against the official chart. It prints a chance line (official shapes shuffled over the official positions) beside every shape score, sustain precision and recall, a style panel (z against `data/ghl-eval-stats.json`, built from the training songs) and how alike repeated sections are.
 - Memory: `train_ghl` holds the whole dataset (about 6 GB of RAM). Run nothing else that loads all records at the same time, or the machine runs out of memory.
-- `tempo.detect` moves librosa's beats `BEAT_LAG_S` earlier. Without it every note sits about 30 ms late against the official charts.
+- `tempo.detect` tracks beats with madmom's RNN + DBN tracker and does not shift them (madmom's lag is -1.5 ms). `_beat_activation` runs madmom's eight BLSTMs stacked: about 3 s a song on the CPU against 17 s in madmom, with the same beats. librosa's onset envelope still peaks about 30 ms late, so every lookup of it against the beat grid subtracts `ONSET_LAG_S`. There is no automatic tempo-octave rule: a fixed BPM range made madmom's octave worse on the official charts (69-258 BPM).
 - More official charts barely help the shapes: a learning curve on 25/50/100% of the songs scores the same chord size and row.
 - The chart-to-audio offset of an official song is its `song.ini` `delay`. Onset matching alone locks onto a beat-multiple on periodic music.
 - Official ladder facts (from the official charts): every lower-tier note sits on an Expert tick, Easy uses only W1/W2/W3, W1+W2 and W2+W3, and Medium has no 3-button chords.

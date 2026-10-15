@@ -90,6 +90,13 @@ echo "installing everything else ..."
 echo "installing basic-pitch ..."
 "$py" -m pip install basic-pitch==0.4.0 --no-deps
 
+# madmom (the beat tracker) has no release that builds on current Python. Its
+# git master does, against the numpy already installed, once cython is there.
+echo "installing madmom ..."
+"$py" -m pip install cython==3.3.0
+"$py" -m pip install --no-build-isolation --no-deps \
+    "madmom @ git+https://github.com/CPJKU/madmom@27f032e8947204902c675e5e341a3faf5dc86dae"
+
 if ((training)); then
     echo "installing training stack ..."
     "$py" -m pip install pytorch-lightning==2.5.6 lightning==2.5.5 \

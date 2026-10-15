@@ -151,7 +151,7 @@ def run(opts, progress=print, should_cancel=lambda: False) -> dict:
     duration_s = librosa.get_duration(y=y, sr=sr)
     if duration_s < 30:
         raise ValueError(f"audio must be at least 30s, got {duration_s:.0f}s")
-    tempo = tempomod.detect(y, sr, bpm_mult=getattr(opts, "bpm_mult", "auto"))
+    tempo = tempomod.detect(y, sr, bpm_mult=getattr(opts, "bpm_mult", "1"))
     res = tempo.resolution
     progress(f"      {duration_s:.0f}s, {tempo.bpm:.1f} BPM, "
              f"{len(tempo.sync_track())} tempo event(s)")

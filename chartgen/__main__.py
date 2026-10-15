@@ -41,10 +41,9 @@ def build_args(argv):
     ap.add_argument("--density", choices=("onset", "model"), default="onset",
                     help="onset: drop transcribed positions lacking onset "
                          "evidence in the audio. model: keep every position")
-    ap.add_argument("--bpm-mult", choices=("auto", "0.5", "1", "2"), default="auto",
-                    help="tempo octave: auto picks the conventional 70-165 BPM "
-                         "range (the label decides HOPO vs strum feel); 1 keeps "
-                         "the raw detection; 0.5/2 force half/double time")
+    ap.add_argument("--bpm-mult", choices=("0.5", "1", "2"), default="1",
+                    help="tempo octave (the label decides HOPO vs strum feel): "
+                         "1 keeps the detected tempo; 0.5/2 force half/double time")
     ap.add_argument("--reducer", choices=("chartgen", "easygen"), default="chartgen",
                     help="chartgen: HOPO-preserving reduction with order-"
                          "preserving lane remaps. easygen: the vendored "

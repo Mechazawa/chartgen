@@ -740,6 +740,49 @@ def test_tempo_octave_helpers():
     assert all(any(abs(doubled - b) < 1e-9) for b in slow)
 
 
+def _click_track(bpm, seconds, sr=22050, start=0.5):
+    clicks = np.arange(start, seconds - 0.1, 60.0 / bpm)
+    y = np.zeros(int(seconds * sr), dtype=np.float32)
+    burst = (np.random.default_rng(0).standard_normal(int(0.02 * sr))
+             * np.exp(-np.arange(int(0.02 * sr)) / (0.003 * sr))).astype(np.float32)
+    for click in clicks:
+        at = int(click * sr)
+        y[at:at + len(burst)] += burst
+    return y, sr, clicks
+
+
+def test_click_tracks_come_out_at_their_tempo_and_on_the_clicks():
+    """The grid sits on the transient with no lag shift, and the tempo keeps
+    its octave: 75 and 180 BPM both lie outside any 'conventional' range a
+    fold would push them into."""
+    from chartgen.tempo import detect
+
+    for bpm in (75.0, 120.0, 180.0):
+        y, sr, clicks = _click_track(bpm, 20.0)
+        found = detect(y, sr)
+        assert abs(found.bpm - bpm) < 0.5, (bpm, found.bpm)
+        inner = clicks[2:-2]
+        error = np.abs(inner[:, None] - found.beat_times[None, :]).min(axis=1)
+        assert np.median(error) < 0.008, (bpm, np.median(error))
+        assert error.max() < 0.02, (bpm, error.max())
+
+
+def test_stacked_beat_networks_match_madmom():
+    """_beat_activation reimplements madmom's network loop; it must give the
+    activation madmom's own processor gives."""
+    import librosa
+    from madmom.features.beats import RNNBeatProcessor
+
+    from chartgen.tempo import TRACKER_SR, _beat_activation
+
+    y, sr, _ = _click_track(97.0, 6.0)
+    y += 0.05 * np.sin(2 * np.pi * 220 * np.arange(len(y)) / sr).astype(np.float32)
+    y44 = librosa.resample(y, orig_sr=sr, target_sr=TRACKER_SR)
+    ours, theirs = _beat_activation(y44), RNNBeatProcessor()(y44)
+    assert ours.shape == theirs.shape
+    assert np.abs(ours - theirs).max() < 1e-3, np.abs(ours - theirs).max()
+
+
 def test_sixteenth_grid_stays_inside_the_natural_hopo_window():
     """HOPOs are implicit in .chart, so the grid choice is what creates them.
 
