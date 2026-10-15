@@ -25,8 +25,8 @@ class Cancelled(Exception):
 
 
 class _Prefetch:
-    """Chart-independent analyses started on CPU threads as soon as the
-    tempo map exists, while the GPU separates stems.
+    """Chart-independent analyses started as soon as the tempo map exists,
+    while the GPU separates stems.
 
     Every job is a pure function of (audio, tempo) that the pipeline used
     to compute later, in sequence, on an idle CPU: the mix transcription,
@@ -34,20 +34,25 @@ class _Prefetch:
     profiles, the solo detector's pitch/chroma analysis, and the LRCLIB
     lookup. Each result is consumed at exactly the point the inline call
     used to happen, and a job's exception surfaces there too, so the chart
-    - and every failure message - is the same as before. onnxruntime and
-    librosa's numba kernels release the GIL for their heavy work, which is
-    what makes the overlap real.
+    - and every failure message - is the same as before. Jobs run on
+    threads by default; a job that holds the GIL for seconds (librosa's
+    pyin Viterbi is numba code compiled without nogil) passes
+    holds_gil=True and runs in a worker process instead, so it does not
+    stall the thread that feeds the GPU. Such a job's function and
+    arguments must pickle.
     """
 
     def __init__(self):
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
         self.pool = ThreadPoolExecutor(max_workers=4,
                                        thread_name_prefix="chartgen-prefetch")
+        self.processes = ProcessPoolExecutor(max_workers=1)
         self.jobs = {}
 
-    def submit(self, name, fn, *args, **kwargs):
-        self.jobs[name] = self.pool.submit(fn, *args, **kwargs)
+    def submit(self, name, fn, *args, holds_gil=False, **kwargs):
+        pool = self.processes if holds_gil else self.pool
+        self.jobs[name] = pool.submit(fn, *args, **kwargs)
 
     def has(self, name) -> bool:
         return name in self.jobs
@@ -57,6 +62,7 @@ class _Prefetch:
 
     def close(self):
         self.pool.shutdown(wait=False)
+        self.processes.shutdown(wait=False, cancel_futures=True)
 
 
 def _folder_name(artist: str, name: str) -> str:
@@ -176,7 +182,7 @@ def run(opts, progress=print, should_cancel=lambda: False) -> dict:
     if not getattr(opts, "no_solos", False):
         from . import solo as solomod
 
-        pre.submit("solo_analysis", solomod.analyze, y, sr)
+        pre.submit("solo_analysis", solomod.analyze, y, sr, holds_gil=True)
     if not opts.no_sections:
         from . import structure
 

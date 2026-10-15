@@ -118,33 +118,42 @@ def windows_for(tempo, duration_s: float):
     return out
 
 
-def transcribe_stems(mono, sr, progress=lambda m: None, known=None):
-    """Basic Pitch on each true melodic stem; `known` supplies already
-    transcribed stems (the chord-texture pass makes the guitar's)."""
+def _transcribe_stem(samples, sr, key):
     import tempfile
 
     import soundfile as sf
 
     from . import transcribe
 
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fh:
+        path = fh.name
+    try:
+        sf.write(path, samples, sr)
+        return transcribe.transcribe(path, cache_key=key)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def transcribe_stems(mono, sr, progress=lambda m: None, known=None):
+    """Basic Pitch on each true melodic stem; `known` supplies already
+    transcribed stems (the chord-texture pass makes the guitar's). Stems
+    without a cached transcription run in parallel worker processes, since
+    Basic Pitch's note creation is pure Python and holds the GIL."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    from . import transcribe
+
     out = dict(known or {})
     stem_key = mono.get("_key")
-    for name in STEMS:
-        if name in out:
-            continue
-        key = f"{stem_key}:{name}:bp" if stem_key else None
-        cached = transcribe.cached_transcription(key) if key else None
-        if cached is not None:
-            out[name] = cached
-            continue
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fh:
-            path = fh.name
-        try:
-            sf.write(path, mono[name], sr)
-            out[name] = transcribe.transcribe(path, cache_key=key)
-        finally:
-            Path(path).unlink(missing_ok=True)
-    return out
+    keys = {name: f"{stem_key}:{name}:bp" if stem_key else None
+            for name in STEMS if name not in out}
+    events = {name: transcribe.cached_transcription(key) for name, key in keys.items()}
+    todo = [name for name in keys if events[name] is None]
+    if todo:
+        with ProcessPoolExecutor(len(todo)) as pool:
+            jobs = {name: pool.submit(_transcribe_stem, mono[name], sr, keys[name]) for name in todo}
+            events |= {name: job.result() for name, job in jobs.items()}
+    return out | {name: events[name] for name in keys}
 
 
 def smooth(labels):

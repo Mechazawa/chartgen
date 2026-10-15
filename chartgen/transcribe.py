@@ -49,7 +49,10 @@ def transcribe(audio_path: str, progress=lambda m: None, cache_key: str | None =
     cache_key names the audio content (chartgen.cache); when given, a
     previous transcription of the same content is returned as is, and a
     fresh one is stored. Basic Pitch on CPU is deterministic, so the cached
-    events are the events it would produce again.
+    events are the events it would produce again. onnxruntime's worker
+    threads sleep instead of spinning between kernels, so several
+    transcriptions at once (prominence.transcribe_stems) do not burn each
+    other's cores; the events are bit-identical either way.
     """
     import logging
 
@@ -61,10 +64,17 @@ def transcribe(audio_path: str, progress=lambda m: None, cache_key: str | None =
             progress("      transcription: cached notes reused")
             return hit
     logging.getLogger().setLevel(logging.ERROR)  # its TF warnings are noise here
-    from basic_pitch.inference import predict
+    import onnxruntime as ort
+    from basic_pitch import ICASSP_2022_MODEL_PATH
+    from basic_pitch.inference import Model, predict
 
+    model = Model(ICASSP_2022_MODEL_PATH)
+    options = ort.SessionOptions()
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    model.model = ort.InferenceSession(str(ICASSP_2022_MODEL_PATH), options,
+                                       providers=["CPUExecutionProvider"])
     progress("      transcribing notes (Basic Pitch)")
-    _, _, note_events = predict(str(audio_path))
+    _, _, note_events = predict(str(audio_path), model)
     events = [(float(s), float(e), int(p), float(a))
               for s, e, p, a, *_ in note_events]
     if cache_key:

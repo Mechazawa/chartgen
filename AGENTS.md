@@ -5,6 +5,7 @@
 - Tests: `.venv/bin/python -m tests.test_chartgen` and `.venv/bin/python -m tests.test_motifs`. There is no linter config.
 - madmom 0.16.1 on PyPI does not build on Python 3.14. `scripts/install.sh` installs cython, then a pinned madmom git commit with `--no-build-isolation --no-deps`. The venv may have no pip (uv-built): use `uv pip install --python .venv/bin/python`.
 - Kill background jobs by PID (`ps -eo pid,comm,args | awk '$2 ~ /python/ ...'`). `pkill -f <pattern>` also matches the shell that runs it.
+- Basic Pitch amplitudes change in the last float32 bit with onnxruntime's `intra_op_num_threads`, so the events no longer match the cached ones. To run several transcriptions at once, keep the default thread count; `transcribe.transcribe` turns off thread spinning instead.
 
 ## 6-fret (GHL) part
 - Lanes 0-5 are W1 W2 W3 B1 B2 B3 and 7 is open, in the same `(tick, lane, sustain)` tuples as 5-fret. The writer maps lane 5 to `.chart` note 8 (`chart.GHL_NOTE`).
