@@ -156,6 +156,19 @@ def test_write_chart_numbers_ghl_lanes_and_keeps_forcing_off_them():
     assert "480 = N 5 0" in text.split("[ExpertSingle]")[1].split("}")[0]
 
 
+def test_write_chart_keeps_taps_and_solos_off_ghl_tiers():
+    tiers = {"ExpertSingle": [(480, 0, 0), (960, 1, 0)],
+             "ExpertGHLGuitar": [(480, 0, 0), (960, 3, 0)],
+             "HardGHLGuitar": [(480, 0, 0)]}
+    text = write_chart(tiers, steady(), {"name": "T", "artist": "A", "charter": "c"},
+                       "song.ogg", solos=[(0, 1920)], taps={480, 960})
+    for tier in ("ExpertGHLGuitar", "HardGHLGuitar"):
+        block = text.split(f"[{tier}]")[1].split("}")[0]
+        assert "= N 6 " not in block and "E solo" not in block, tier
+    five = text.split("[ExpertSingle]")[1].split("}")[0]
+    assert "480 = N 6 0" in five and "0 = E solo" in five and "1920 = E soloend" in five
+
+
 def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
     """Lower tiers only drop Expert positions, and no tier emits a shape the
     official charts never use there (Easy is white-row only)."""

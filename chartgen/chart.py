@@ -90,10 +90,11 @@ def write_chart(
         for tick, text, _ in sorted(merged, key=lambda e: (e[0], _event_rank(e[1]), e[2]))
     )
     blocks = "\n".join(
-        _tier_block(name, tiers[name], list(star_power), list(solos), set(taps),
-                    set(forced) if name == "ExpertSingle" else frozenset(),
-                    GHL_NOTE if name in GHL_TIERS else None)
-        for name in TIERS + GHL_TIERS if tiers.get(name)
+        [_tier_block(name, tiers[name], list(star_power), list(solos), set(taps),
+                     set(forced) if name == "ExpertSingle" else frozenset())
+         for name in TIERS if tiers.get(name)]
+        + [_tier_block(name, tiers[name], list(star_power), note_numbers=GHL_NOTE)
+           for name in GHL_TIERS if tiers.get(name)]
     )
 
     return f"""[Song]
