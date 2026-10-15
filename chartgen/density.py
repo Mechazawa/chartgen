@@ -18,6 +18,8 @@ out because nothing does. Two safeguards keep it musical:
 """
 import numpy as np
 
+from .tempo import BEAT_LAG_S
+
 GAP_BEATS = 2.0  # never open a hole bigger than this
 
 
@@ -26,7 +28,7 @@ def onset_scores(notes, y, sr, tempo):
     import librosa
 
     env = librosa.onset.onset_strength(y=y, sr=sr)
-    times = librosa.times_like(env, sr=sr)
+    times = librosa.times_like(env, sr=sr) - BEAT_LAG_S  # on the beat grid's time base
     if env.max() <= 0:
         return {tick: 1.0 for tick, _, _ in notes}
 
@@ -109,7 +111,7 @@ def onset_fidelity(notes, y, sr, tempo, tolerance_s: float = 0.07) -> float:
     if len(peaks) == 0:
         return 0.0
 
-    peaks = np.asarray(peaks, dtype=float)
+    peaks = np.asarray(peaks, dtype=float) - BEAT_LAG_S
     chart_arr = np.asarray(chart, dtype=float)
 
     def covered(a, b):

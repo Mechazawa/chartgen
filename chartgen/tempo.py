@@ -161,7 +161,7 @@ def _halve(beats: np.ndarray, y, sr) -> np.ndarray:
     env = librosa.onset.onset_strength(y=y, sr=sr)
     times = librosa.times_like(env, sr=sr)
     even, odd = beats[0::2], beats[1::2]
-    strength = [float(np.interp(b, times, env).mean()) for b in (even, odd)]
+    strength = [float(np.interp(b + BEAT_LAG_S, times, env).mean()) for b in (even, odd)]
     return even if strength[0] >= strength[1] else odd
 
 
