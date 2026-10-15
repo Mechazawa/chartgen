@@ -20,6 +20,7 @@ import random
 import re
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -116,7 +117,7 @@ def main(argv=None):
         res = tm.resolution
         last_s = float(note_times[-1]) + 1.0
         bounds = [tm.beat_to_time(t / res) for t, _ in marks] + [last_s]
-        spans_s = [(a, b) for a, b in zip(bounds, bounds[1:]) if b > a]
+        spans_s = [(a, b) for a, b in pairwise(bounds) if b > a]
         nt = np.array(note_times)
         tt = np.array(tap_times) if tap_times else np.zeros(0)
         sections = []

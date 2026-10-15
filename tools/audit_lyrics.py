@@ -11,6 +11,7 @@ repeat themselves (the signature of a Whisper hallucination loop).
 import argparse
 import re
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 from study_solos import blocks, note_ticks, RES_RE
@@ -37,7 +38,7 @@ def audit(path: Path):
     last_note = ticks[-1]
     # Phrases: consecutive words split on gaps of a bar or more.
     phrases, current = [], [words[0]]
-    for prev, cur in zip(words, words[1:]):
+    for prev, cur in pairwise(words):
         if cur[0] - prev[0] > 4 * res:
             phrases.append(current)
             current = []
@@ -54,7 +55,7 @@ def audit(path: Path):
         "phrases": len(phrases),
         "last_word_beats_before_end": (last_note - words[-1][0]) / res,
         "biggest_tail_gap": max(
-            ((cur[0] - prev[0]) / res for prev, cur in zip(words, words[1:])
+            ((cur[0] - prev[0]) / res for prev, cur in pairwise(words)
              if cur[0] > last_note * 0.6), default=0.0),
         "repeated_tail": repeated,
         "tail_text": " | ".join(t[:48] for t in texts[-3:]),

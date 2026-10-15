@@ -238,7 +238,7 @@ def timeline(audio_path, tempo, duration_s, progress=lambda m: None, known_event
         labels.append(stem)
         out.append({"t0": t0, "t1": t1, "beat0": b0, "beat1": b1, "stem": stem, "conf": conf,
                     "probs": {s: float(proba[j][n]) for n, s in enumerate(STEMS)}})
-    for w, lab, j in zip(out, smooth(labels), range(len(out))):
+    for w, lab, j in zip(out, smooth(labels), range(len(out)), strict=True):
         w["stem"] = lab
         w["features"] = feats[keep[j]]
     return out
@@ -525,11 +525,11 @@ def rhythm_rescue(expert, followed, mono, sr, tempo):
         else:
             lanes = _lanes_from_contour(_centroids(sig, sr, all_times), all_str)
             voicing = [(lane,) for lane in lanes]
-        for i, v in zip(keep, voicing[:len(keep)]):
+        for i, v in zip(keep, voicing[:len(keep)], strict=True):
             for lane in v:
                 added.append((ticks[i], lane, 0))
             by_tick.add(ticks[i])
-        for t, v in zip(opens_here, voicing[len(keep):]):
+        for t, v in zip(opens_here, voicing[len(keep):], strict=True):
             relaned_opens[t] = v
         touched += 1
     if not added and not relaned_opens:

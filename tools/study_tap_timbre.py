@@ -21,6 +21,7 @@ import argparse
 import re
 import statistics
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,7 +40,7 @@ def tick_to_time(sync, resolution):
     if not events or events[0][0] != 0:
         events = [(0, 120000)] + events
     starts = [0.0]
-    for (t0, bpm), (t1, _) in zip(events, events[1:]):
+    for (t0, bpm), (t1, _) in pairwise(events):
         starts.append(starts[-1] + (t1 - t0) / resolution * 60.0 / (bpm / 1000.0))
 
     def at(tick):
@@ -90,7 +91,6 @@ def study(chart: Path, audio: Path):
     for name, feature in rows.items():
         tap_vals = [sample(feature, at(t)) for t in tapped]
         plain_vals = [sample(feature, at(t)) for t in plain]
-        mean = statistics.mean(plain_vals)
         spread = statistics.pstdev(plain_vals) or 1e-9
         # Median tap position, in z-units of this song's strummed notes.
         out[name] = (statistics.median(tap_vals) - statistics.median(plain_vals)) / spread

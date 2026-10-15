@@ -70,7 +70,7 @@ def candidates(song, max_run=3):
             out.append({
                 "start": group[0]["start"], "end": group[-1]["end"],
                 "notes": sum(g["notes"] for g in group),
-                "z": {k: sum(g["z"][k] * w for g, w in zip(group, weights)) / total
+                "z": {k: sum(g["z"][k] * w for g, w in zip(group, weights, strict=True)) / total
                       for k in FEATURES},
             })
     return out

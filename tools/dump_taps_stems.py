@@ -78,7 +78,7 @@ def main(argv=None):
     rows = list(done.values())
     started = time.time()
     hop = int(0.05 * stemsmod.SR)
-    for i, r in enumerate(plan, 1):
+    for r in plan:
         if r["song"] in done:
             continue
         folder = args.library / r["song"]

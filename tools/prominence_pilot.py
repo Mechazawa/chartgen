@@ -30,6 +30,7 @@ import re
 import sys
 import tempfile
 import time
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -83,7 +84,7 @@ def parse_chart(chart: Path):
     last = ticks[-1]
     step = BARS_PER_WINDOW * 4 * res
     bounds = [t2s(t) for t in range(0, last + step, step)] + [t2s(last + step)]
-    windows = [(a, b) for a, b in zip(bounds, bounds[1:]) if b > a]
+    windows = [(a, b) for a, b in pairwise(bounds) if b > a]
     return onsets, windows
 
 
@@ -98,7 +99,7 @@ def onsets_of(events, min_amp=0.20):
 
 def greedy_match(a, b, tol=TOL):
     """Greedy 1:1 matching of sorted arrays a, b within tol -> list of (i, j)."""
-    pairs, j = [], 0
+    pairs = []
     used = np.zeros(len(b), dtype=bool)
     for i, t in enumerate(a):
         lo = np.searchsorted(b, t - tol)

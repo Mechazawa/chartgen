@@ -11,6 +11,7 @@ import argparse
 import re
 import statistics
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 SECTION_RE = re.compile(r'(\d+)\s*=\s*E\s+"?(?:section|prc)[ _]([^"]+)"?')
@@ -59,7 +60,7 @@ def main():
         charts += 1
 
         spans = []
-        for (start, name), (end, _) in zip(marks, marks[1:]):
+        for (start, name), (end, _) in pairwise(marks):
             pattern = {(t - start, l) for t, l in notes if start <= t < end}
             if len(pattern) >= 8:
                 spans.append((name, end - start, pattern))

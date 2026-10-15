@@ -10,6 +10,9 @@ What stands between a raw transcription and a playable chart — and what this
 module does — is selection: a full mix transcribes EVERYTHING (bass, pads,
 vocal melody, bells). A chart wants the lead line plus supporting chords.
 """
+
+from itertools import pairwise
+
 import numpy as np
 
 # Below guitar low E: bass lines and kick-drum fundamentals. A guitar chart
@@ -195,7 +198,7 @@ def expert_from_notes(
         by_tick.setdefault(tick, []).append((amp, pitch, end - start))
 
     ticks = sorted(by_tick)
-    next_tick = dict(zip(ticks, ticks[1:]))
+    next_tick = dict(pairwise(ticks))
     floor = res // 2          # shorter reads as a tap, not a sustain
     release = res // 4
     cap = 4 * res
@@ -357,7 +360,7 @@ def triple_song_evidence(events, tempo,
     res = tempo.resolution
     bar = res * 4
     by_tick: dict[int, list] = {}
-    for s, e, p, a in events:
+    for s, _, p, a in events:
         if p >= min_pitch and a >= min_amplitude:
             by_tick.setdefault(tempo.quantize(s, subdiv=4), []).append((a, p))
     chords = 0
@@ -694,7 +697,6 @@ def bass_fallback_events(events, tempo,
     still become an open note downstream, which is exactly the human use
     of opens (bass drops, chugs, pedal tones).
     """
-    res = tempo.resolution
     bar_beats = 4.0
 
     def bar_of(t):

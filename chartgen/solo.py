@@ -29,6 +29,9 @@ section has to look like a solo on several independent counts before it is
 marked, and songs with nothing convincing get no marker at all — which is
 what 70% of human charts do anyway.
 """
+
+from itertools import pairwise
+
 import numpy as np
 
 # Every constant below came out of tools/sweep_solos.py, hits IoU-gated at
@@ -108,7 +111,7 @@ MIN_BEATS_GUITAR = 32.0   # the split-halves chose 32 over 48 every time
 
 def _section_spans(section_marks, last_tick, resolution):
     bounds = [t for t, _ in section_marks] + [last_tick + 1]
-    return list(zip(bounds, bounds[1:]))
+    return list(pairwise(bounds))
 
 
 def section_evidence(y, sr, tempo, spans, resolution, analysis=None):
@@ -121,7 +124,7 @@ def section_evidence(y, sr, tempo, spans, resolution, analysis=None):
     pipeline runs it on a CPU thread while the GPU separates stems).
     """
     rows = _features(y, sr, tempo, spans, resolution, analysis)
-    for row, fresh in zip(rows, _novelty(rows)):
+    for row, fresh in zip(rows, _novelty(rows), strict=True):
         if row is not None:
             row["novelty"] = fresh
             row.pop("chroma", None)
@@ -242,7 +245,7 @@ def _zscores(rows):
 
 def _candidates(spans, rows, resolution):
     """Runs of 1..MAX_RUN consecutive sections, with their evidence pooled."""
-    usable = [(span, row) for span, row in zip(spans, rows) if row is not None]
+    usable = [(span, row) for span, row in zip(spans, rows, strict=True) if row is not None]
     out = []
     for i in range(len(usable)):
         for run in range(1, MAX_RUN + 1):
@@ -253,7 +256,7 @@ def _candidates(spans, rows, resolution):
             total = sum(weights) or 1
             out.append((
                 group[0][0][0], group[-1][0][1],
-                {k: sum(row["z"][k] * w for (_, row), w in zip(group, weights)) / total
+                {k: sum(row["z"][k] * w for (_, row), w in zip(group, weights, strict=True)) / total
                  for k in FEATURES},
             ))
     return out

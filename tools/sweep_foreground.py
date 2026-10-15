@@ -62,7 +62,7 @@ def main(argv=None):
             if not fg:
                 continue
             songs += 1
-            for (share, bright), sec in zip(fg, r["sections"]):
+            for (share, bright), sec in zip(fg, r["sections"], strict=True):
                 if sec["notes"] < MIN_NOTES:
                     continue
                 ts = sec["taps"] / sec["notes"]

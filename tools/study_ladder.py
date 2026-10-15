@@ -19,6 +19,7 @@ import argparse
 import re
 import statistics
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -45,8 +46,8 @@ def main(argv=None):
     ap.add_argument("library", type=Path)
     args = ap.parse_args(argv)
 
-    adjacent = {pair: [] for pair in zip(TIERS, TIERS[1:])}
-    inclusion = {pair: [] for pair in zip(TIERS, TIERS[1:])}
+    adjacent = {pair: [] for pair in pairwise(TIERS)}
+    inclusion = {pair: [] for pair in pairwise(TIERS)}
     sp_per_song, sp_gap_beats, sp_len_beats, sp_tail_beats = [], [], [], []
 
     n = 0
@@ -64,7 +65,7 @@ def main(argv=None):
         if any(len(ticks.get(t, ())) < 30 for t in TIERS):
             continue
         n += 1
-        for hi, lo in zip(TIERS, TIERS[1:]):
+        for hi, lo in pairwise(TIERS):
             adjacent[(hi, lo)].append(len(ticks[lo]) / len(ticks[hi]))
             inclusion[(hi, lo)].append(len(ticks[lo] & ticks[hi]) / len(ticks[lo]))
 
@@ -74,7 +75,7 @@ def main(argv=None):
         if phrases:
             sp_per_song.append(len(phrases) / max(1.0, last / res / 40))
             sp_len_beats.extend((l / res) for _, l in phrases)
-            sp_gap_beats.extend((b2 - a) / res for (a, _), (b2, _) in zip(phrases, phrases[1:]))
+            sp_gap_beats.extend((b2 - a) / res for (a, _), (b2, _) in pairwise(phrases))
             sp_tail_beats.append((last - (phrases[-1][0] + phrases[-1][1])) / res)
 
     print(f"{n} full-ladder human charts\n")

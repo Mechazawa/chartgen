@@ -1,7 +1,6 @@
 """Aggregate bp_sweep.jsonl: medians per config and source, paired deltas vs
 the default decode (D), split multitrack (real guitar stem) vs mix-only."""
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +22,7 @@ def table(source, subset):
     print(f"{'cfg':>14s} {'rec50':>6s} {'rec80':>6s} {'prec80':>6s} {'det/human':>9s} {'|err|ms':>7s} {'bias':>6s} {'d_rec80 vs D (med, p25, p75)':>30s} {'wins':>5s}")
     keys = list(subset[0][source]["configs"].keys()) + ["onsetpost_0.1", "onsetpost_0.25", "specflux"]
     for k in keys:
-        get = (lambda r: r[source]["configs"][k]) if k in subset[0][source]["configs"] else (lambda r: r[source][k])
+        get = (lambda r, k=k: r[source]["configs"][k]) if k in subset[0][source]["configs"] else (lambda r, k=k: r[source][k])
         base = lambda r: r[source]["configs"]["D"]
         d = np.array([get(r)["recall80"] - base(r)["recall80"] for r in subset])
         wins = int((d > 0.01).sum())

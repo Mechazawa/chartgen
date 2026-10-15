@@ -95,7 +95,7 @@ def second_voices(guitar_events, tempo,
     evidence-gated feature."""
     out = {}
     by_tick: dict[int, list] = {}
-    for s, e, p, a in guitar_events:
+    for s, _, p, a in guitar_events:
         if p >= min_pitch and a >= min_amplitude:
             by_tick.setdefault(tempo.quantize(s, subdiv=4), []).append((a, p))
     for t, group in by_tick.items():

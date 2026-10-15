@@ -19,8 +19,6 @@ of the song - is the named acceptance case.
 """
 import itertools
 import json
-import random
-import statistics
 import sys
 from pathlib import Path
 
@@ -58,7 +56,7 @@ def load_songs(stems_tag: str = ""):
         st = stems.get(song["name"])
         if not st or len(st) != len(song["sections"]):
             continue
-        for section, extra in zip(song["sections"], st):
+        for section, extra in zip(song["sections"], st, strict=True):
             section["stem"] = extra
         if zscores(song["sections"]):
             joined.append(song)
@@ -78,19 +76,19 @@ def candidates(song, max_run=3):
             out.append({
                 "start": group[0]["start"], "end": group[-1]["end"],
                 "notes": sum(g["notes"] for g in group),
-                "z": {k: sum(g["z"][k] * w for g, w in zip(group, weights)) / total
+                "z": {k: sum(g["z"][k] * w for g, w in zip(group, weights, strict=True)) / total
                       for k in FEATURES},
                 "singing": sum(g["stem"]["singing"] * w
-                               for g, w in zip(group, weights)) / total,
+                               for g, w in zip(group, weights, strict=True)) / total,
                 "lead": sum(g["stem"]["lead"] * w
-                            for g, w in zip(group, weights)) / total,
+                            for g, w in zip(group, weights, strict=True)) / total,
                 # Guitar-stem evidence (SW dumps only; 0 under Demucs):
                 # the featured-line-vs-accompaniment signal earlier sweeps
                 # lacked. z = surge against the song's own guitar baseline.
                 "guitar": sum(g["stem"].get("guitar", 0.0) * w
-                              for g, w in zip(group, weights)) / total,
+                              for g, w in zip(group, weights, strict=True)) / total,
                 "guitar_share": sum(g["stem"].get("guitar_share", 0.0) * w
-                                    for g, w in zip(group, weights)) / total,
+                                    for g, w in zip(group, weights, strict=True)) / total,
             })
     return out
 

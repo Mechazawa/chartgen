@@ -17,12 +17,13 @@ import argparse
 import re
 import statistics
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from study_solos import blocks, is_generated, RES_RE
-from study_tap_timbre import SYNC_RE, tick_to_time
+from study_tap_timbre import SYNC_RE
 
 NOTE_RE = re.compile(r"(\d+)\s*=\s*N\s+(\d+)\s+(\d+)")
 OPEN = 7
@@ -43,8 +44,6 @@ def study(chart: Path):
     ticks = sorted(by_tick)
     if len(ticks) < 100:
         return None
-    at = tick_to_time(sync, res)
-
     chords = [t for t in ticks if len(by_tick[t]) > 1]
     if not ticks:
         return None
@@ -59,7 +58,7 @@ def study(chart: Path):
     # Chord transitions: consecutive chord positions within 1 beat.
     same_shape = changed = 0
     change_gaps = []
-    for a, c in zip(ticks, ticks[1:]):
+    for a, c in pairwise(ticks):
         if len(by_tick[a]) > 1 and len(by_tick[c]) > 1 and c - a <= res:
             if set(by_tick[a]) == set(by_tick[c]):
                 same_shape += 1
@@ -82,8 +81,8 @@ def study(chart: Path):
 
     # Gallops: gap pattern short-short-long at 8th/16th scale on singles.
     gallops = 0
-    gaps = [(c - a) / res for a, c in zip(ticks, ticks[1:])]
-    for g1, g2, g3 in zip(gaps, gaps[1:], gaps[2:]):
+    gaps = [(c - a) / res for a, c in pairwise(ticks)]
+    for g1, g2, g3 in zip(gaps, gaps[1:], gaps[2:], strict=False):
         if 0.2 <= g1 <= 0.3 and 0.2 <= g2 <= 0.3 and g3 >= 0.45:
             gallops += 1
 

@@ -14,6 +14,7 @@ import random
 import re
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -77,7 +78,7 @@ def main(argv=None):
             tmap = tempomod.detect(y, sr, resolution=res)
             marks = expression.sections(y, sr, tmap)
             bounds = [t for t, _ in marks] + [ticks[-1] + 1]
-            sections = list(zip(bounds, bounds[1:]))
+            sections = list(pairwise(bounds))
             rows = solo.section_evidence(y, sr, tmap, sections, res)
         except Exception as error:
             print(f"  [{i}] {chart.parent.name[:40]}: {type(error).__name__}: {error}",
@@ -96,7 +97,7 @@ def main(argv=None):
                     "notes": sum(1 for t in ticks if start <= t < end),
                     "evidence": row,
                 }
-                for (start, end), row in zip(sections, rows)
+                for (start, end), row in zip(sections, rows, strict=True)
             ],
         })
         args.out.write_text(json.dumps(out), encoding="utf-8")

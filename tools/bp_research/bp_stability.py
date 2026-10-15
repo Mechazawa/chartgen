@@ -7,7 +7,6 @@ For a few isolated guitar stems: transcribe as-is and with 50 / 130 ms of
 leading silence, undo the offset, and compare onset sets at 20 ms tolerance.
 Also compare pitch sets of matched onsets.
 """
-import sys
 import warnings
 from pathlib import Path
 

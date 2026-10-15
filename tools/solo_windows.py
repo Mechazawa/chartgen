@@ -134,7 +134,7 @@ def main(argv=None):
 
     # runs -> solos
     by_song = {}
-    for (gi, t0, t1), p in zip(meta, prob):
+    for (gi, t0, t1), p in zip(meta, prob, strict=True):
         by_song.setdefault(gi, []).append((t0, t1, p))
     print("\n=== solo-level (a predicted run hits a human solo when they overlap by >= half the shorter one) ===")
     print("shipped guitar-stem rule for reference: precision 82%  recall 6%  quiet fires ~2%  (held-out)")

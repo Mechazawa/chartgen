@@ -14,6 +14,7 @@ import argparse
 import re
 import statistics
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 TIERS = ("ExpertSingle", "HardSingle", "MediumSingle", "EasySingle")
@@ -32,7 +33,7 @@ def tier_stats(body: str, resolution: int) -> dict | None:
     ticks = sorted(by_tick)
     # Gap to the previous position, in beats — tempo-independent, and what
     # "fast passage" means in practice.
-    gaps = {t: (t - p) / resolution for p, t in zip(ticks, ticks[1:])}
+    gaps = {t: (t - p) / resolution for p, t in pairwise(ticks)}
 
     tapped, tap_chords, tap_gaps, other_gaps = [], 0, [], []
     for tick in ticks:

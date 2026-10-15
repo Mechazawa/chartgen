@@ -3,6 +3,7 @@
 Run: python -m tests.test_chartgen
 """
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -244,7 +245,7 @@ def test_star_power_is_bar_aligned_spaced_and_non_empty():
         assert any(start <= t < start + length for t in ticks), "empty phrase"
     starts = [s for s, _ in phrases]
     assert starts == sorted(starts)
-    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    gaps = [b - a for a, b in pairwise(starts)]
     assert all(g >= 6 * bar for g in gaps), f"phrases too bunched: {gaps}"
 
 
@@ -409,7 +410,7 @@ def _natural_hopos(notes, thr=162):
         by.setdefault(tick, []).append(lane)
     ticks = sorted(by)
     return sum(
-        1 for a, b in zip(ticks, ticks[1:])
+        1 for a, b in pairwise(ticks)
         if len(by[b]) == 1 and by[b][0] != OPEN_LANE
         and b - a < thr and by[b] != by[a]
     )
@@ -557,7 +558,7 @@ def test_density_gate_drops_weak_notes_but_never_tears_holes():
     quiet = sum(1 for k in kept if k >= mid)
     assert loud > quiet, (loud, quiet)
     # The gap constraint held everywhere.
-    for a, b in zip(kept, kept[1:]):
+    for a, b in pairwise(kept):
         assert b - a <= 2 * res + res // 2, f"gate tore a hole: {a}->{b}"
 
 
@@ -787,7 +788,7 @@ def test_top_up_sustains_is_bounded_by_the_measured_share():
         f"share {share:.0%} strays from the {target:.0%} target"
 
     # Sustains still never reach the next note.
-    for (tick, _, sus), (nxt, _, _) in zip(out, out[1:]):
+    for (tick, _, sus), (nxt, _, _) in pairwise(out):
         if nxt != tick:
             assert tick + sus < nxt, f"sustain at {tick} runs into {nxt}"
 
@@ -1205,7 +1206,7 @@ def test_chord_sustains_are_uniform():
     events = [(2.0, 4.0, 60, 0.9), (2.0, 2.4, 64, 0.9), (6.0, 6.1, 62, 0.9)]
     notes = expert_from_notes(events, t, subdiv=4)
     by_tick = {}
-    for tick, lane, sus in notes:
+    for tick, _, sus in notes:
         by_tick.setdefault(tick, []).append(sus)
     chords = [v for v in by_tick.values() if len(v) > 1]
     assert chords and all(len(set(v)) == 1 for v in chords), by_tick
@@ -1608,7 +1609,7 @@ def test_solo_evidence_is_the_same_with_prefetched_analysis():
     inline = solo.section_evidence(y, sr, tm, spans, res)
     ahead = solo.section_evidence(y, sr, tm, spans, res, analysis=solo.analyze(y, sr))
     assert len(inline) == len(ahead)
-    for a, b in zip(inline, ahead):
+    for a, b in zip(inline, ahead, strict=True):
         assert (a is None) == (b is None)
         if a is not None:
             assert a == b, (a, b)

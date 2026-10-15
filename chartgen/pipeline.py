@@ -7,6 +7,7 @@ rather than printed, so the GUI can show it live. Runs take minutes, so there
 is a cancel hook checked between stages.
 """
 import shutil
+from itertools import pairwise
 from pathlib import Path
 
 from . import chart as chartio
@@ -430,7 +431,7 @@ def stemsmod_key(audio_path: str):
 
 def _group(notes):
     out: dict[int, list] = {}
-    for tick, lane, sus in notes:
+    for tick, lane, _ in notes:
         out.setdefault(tick, []).append(lane)
     return out
 
@@ -613,7 +614,7 @@ def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
         from . import structure
 
         ticks = [tick for tick, _ in events]
-        lengths = [b - a for a, b in zip(ticks, ticks[1:])] + [0]
+        lengths = [b - a for a, b in pairwise(ticks)] + [0]
         if signatures is None:
             signatures = structure.section_signatures(y, sr, tempo, ticks)
         repeats = structure.find_repeats(signatures, lengths)
@@ -672,7 +673,7 @@ def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
                                        bpm=tempo.bpm)
         if stepped != tiers["ExpertSingle"]:
             grown = sum(1 for a, b in zip(sorted(tiers["ExpertSingle"]),
-                                          sorted(stepped)) if a[2] != b[2])
+                                          sorted(stepped), strict=True) if a[2] != b[2])
             progress(f"      {grown} note(s) held as sustain stairs "
                      f"(78% of human charts, ~6 phrases per 100 bars)")
             tiers["ExpertSingle"] = stepped

@@ -13,6 +13,9 @@ RHYTHM — which follows what the audio actually does there — and takes the
 earlier section's LANE choices wherever the two line up. Where the sections
 genuinely differ, the later one keeps its own material.
 """
+
+from itertools import pairwise
+
 import numpy as np
 
 OPEN = 7
@@ -146,7 +149,7 @@ def unify_riff_bars(notes, profiles, resolution: int,
     all_ticks = sorted({n[0] for n in notes})
     stamped_bars = 0
     out_by_bar = dict(by_bar)
-    for lead, members in clusters.items():
+    for members in clusters.values():
         if len(members) < min_cluster:
             continue
         fps = {b: fingerprint(b) for b in members}
@@ -204,7 +207,7 @@ def section_signatures(y, sr, tempo, section_ticks: list[int]):
 
     signatures = []
     edges = list(section_ticks) + [None]
-    for start, end in zip(edges, edges[1:]):
+    for start, end in pairwise(edges):
         t0 = tempo.beat_to_time(start / res)
         t1 = tempo.beat_to_time(end / res) if end is not None else float(times[-1])
         window = chroma[:, (times >= t0) & (times < t1)]
@@ -264,7 +267,7 @@ def reuse_patterns(notes, section_ticks: list[int], repeats: dict[int, int]):
 
     last = max(by_tick) + 1
     edges = list(section_ticks) + [last]
-    bounds = list(zip(edges, edges[1:]))
+    bounds = list(pairwise(edges))
     updated = {tick: list(group) for tick, group in by_tick.items()}
 
     for target, source in sorted(repeats.items()):

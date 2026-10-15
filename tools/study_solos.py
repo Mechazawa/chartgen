@@ -12,6 +12,7 @@ import argparse
 import re
 import statistics
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 TIERS = ("ExpertSingle", "HardSingle", "MediumSingle", "EasySingle")
@@ -132,7 +133,7 @@ def study(path: Path) -> dict | None:
     if words and spans and len(words) >= 20:
         gaps = []
         edges = [0] + words + [last]
-        for a, b2 in zip(edges, edges[1:]):
+        for a, b2 in pairwise(edges):
             if (b2 - a) / res >= 8:  # >= 2 bars of no singing
                 gaps.append((a, b2))
         hit = sum(1 for a, b2 in gaps

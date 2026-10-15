@@ -9,6 +9,7 @@ So score a candidate and regenerate if it is bad, rather than trusting one roll.
 """
 import math
 from collections import Counter
+from itertools import pairwise
 
 FRETS = (0, 1, 2, 3, 4)
 OPEN = 7
@@ -61,7 +62,7 @@ def step_profile(notes) -> dict:
         by_tick.setdefault(tick, []).append(lane)
 
     singles = [v[0] for _, v in sorted(by_tick.items()) if len(v) == 1 and v[0] != OPEN]
-    steps = [b - a for a, b in zip(singles, singles[1:])]
+    steps = [b - a for a, b in pairwise(singles)]
     if not steps:
         return {"steps": 0, "adjacent": 0.0, "repeat": 0.0, "run_share": 0.0}
 

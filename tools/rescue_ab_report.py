@@ -146,7 +146,7 @@ def main():
         print(f"\n=== {label}: keyed rescue fired in {len(fired)} window(s) ===")
         print("  windows: " + ", ".join(f"{t0:.0f}-{t1:.0f}s {st or '?'}({n})" for t0, t1, st, n in fired))
         agg = {"keyed": [], "old": []}
-        for t0, t1, st, n in fired:
+        for t0, t1, _, _ in fired:
             hn = in_span(charts["human"], t0, t1)
             for key in ("keyed", "old"):
                 s = window_stats(in_span(charts[key], t0, t1), hn)
@@ -158,13 +158,13 @@ def main():
             if not a:
                 print(f"  {key:8s} (no overlapping notes)")
                 continue
-            med = lambda k: np.nanmedian([x[k] for x in a])
+            med = lambda k, a=a: np.nanmedian([x[k] for x in a])
             print(f"  {key:8s} {med('density'):11.2f} {med('f1'):9.2f} {med('rho'):11.2f} "
                   f"{med('chord'):5.0%} vs {med('hchord'):4.0%} {med('open'):5.0%} vs {med('hopen'):4.0%}")
         # where did the OLD rule's rescued notes come from?
         if c["old"]:
             attribution = {}
-            for t0, t1, st, n in fired:
+            for t0, t1, st, _ in fired:
                 for s0, _, _, _ in c["old"]:
                     if not t0 <= s0 < t1:
                         continue

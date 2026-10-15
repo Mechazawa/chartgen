@@ -161,7 +161,6 @@ def main(argv=None):
                           f"conf {conf[j]:.2f}  level-only {STEMS[pl[j]]}")
 
     print("\n=== learning curve: held-out accuracy vs number of training songs ===")
-    song_ids = np.unique(groups)
     rng = np.random.RandomState(0)
     for n_train in (50, 100, 150, 200, 240):
         accs = []

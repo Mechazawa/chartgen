@@ -13,7 +13,6 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import librosa
 
 warnings.filterwarnings("ignore")
 import logging
@@ -77,8 +76,8 @@ def main():
             ev = lambda e: sorted((x[0], x[2]) for x in e)
             single = compare(ev(s0), ev(s21))[0]
             ens = compare(ev(eA), ev(eB))[0]
-            r = lambda e: coverage(human, onset_times_from_events(e), 0.080)[0]
-            p = lambda e: coverage(onset_times_from_events(e), human, 0.080)[0]
+            r = lambda e, human=human: coverage(human, onset_times_from_events(e), 0.080)[0]
+            p = lambda e, human=human: coverage(onset_times_from_events(e), human, 0.080)[0]
             print(f"{name[:36]:36s} cfg {cfg}: stability single {single:.3f} -> ensemble3 {ens:.3f} | "
                   f"recall80 single {r(s0):.3f} ens {r(eA):.3f} | prec80 single {p(s0):.3f} ens {p(eA):.3f} | "
                   f"notes {len(s0)} -> {len(eA)}", flush=True)

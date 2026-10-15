@@ -201,7 +201,7 @@ def align_words(lines, vocal, sr: int, duration_s: float,
             ratio = (b - a) / emission.shape[1] / model_sr
             aligned[i] = [
                 (a / model_sr + span[0].start * ratio, word)
-                for span, word in zip(spans, words) if span
+                for span, word in zip(spans, words, strict=True) if span
             ]
     progress(f"      {len(aligned)}/{len(lines)} lines word-aligned to the "
              f"vocal stem")
@@ -236,7 +236,7 @@ def from_lines(lines, tempo, duration_s: float,
             weights = [len(w) + 1 for w in words]
             total = sum(weights)
             at, spread = start, []
-            for word, weight in zip(words, weights):
+            for word, weight in zip(words, weights, strict=True):
                 spread.append((min(at, start + span), word))
                 at += span * weight / total
         # The line is displayed until the next one starts (that is what LRC

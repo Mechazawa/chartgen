@@ -10,6 +10,9 @@ The costs below are calibrated so that real human charts come out almost
 entirely feasible — the point of reference is what charters actually ask of
 players, not a theory of finger speed.
 """
+
+from itertools import pairwise
+
 OPEN = 7
 
 # Seconds. A sustained alternate-strum tops out near 12-13 notes/sec for
@@ -72,7 +75,7 @@ def analyse(notes, tempo, hopo_ticks: int | None = None) -> dict:
 
     times = {t: tempo.beat_to_time(t / res) for t in ticks}
     impossible, tight, worst = 0, 0, []
-    for prev, cur in zip(ticks, ticks[1:]):
+    for prev, cur in pairwise(ticks):
         available = times[cur] - times[prev]
         if available <= 0:
             continue
@@ -127,7 +130,7 @@ def enforce(notes, tempo, max_passes: int = 4, hopo_ticks: int | None = None):
 
         times = {t: tempo.beat_to_time(t / res) for t in ticks}
         demote, drop = set(), set()
-        for prev, cur in zip(ticks, ticks[1:]):
+        for prev, cur in pairwise(ticks):
             available = times[cur] - times[prev]
             if available <= 0:
                 continue

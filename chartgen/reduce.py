@@ -23,6 +23,7 @@ Medium  quarter notes, with 8th-position notes kept only where a bar would
 Easy    on-beat singles at least 2 beats apart (1 beat where the song would
         otherwise go silent for a bar). G/R/Y only, order-preserving.
 """
+from itertools import pairwise
 from types import SimpleNamespace
 
 import re
@@ -55,7 +56,7 @@ def _sixteenth_chains(ticks: list[int], resolution: int) -> dict[int, int]:
     """
     chain_len: dict[int, int] = {}
     run = [ticks[0]] if ticks else []
-    for prev, cur in zip(ticks, ticks[1:]):
+    for prev, cur in pairwise(ticks):
         if cur - prev < resolution // 2:
             run.append(cur)
         else:
@@ -172,7 +173,6 @@ def reduce_hard(expert: list[Note], resolution: int,
 def reduce_medium(expert: list[Note], resolution: int) -> list[Note]:
     groups = _by_tick(expert)
     out: list[Note] = []
-    last_kept = -resolution * 8
     for tick in sorted(groups):
         pos = tick % resolution
         # Beats and 8ths, deliberately generous: the ratio cap in derive_tiers
@@ -183,7 +183,6 @@ def reduce_medium(expert: list[Note], resolution: int) -> list[Note]:
         if pos not in (0, resolution // 2):
             continue
         out.extend(_cap_chord(groups[tick], 2))
-        last_kept = tick
     return _dedupe(_remap(out, MEDIUM_LANES))
 
 

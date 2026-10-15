@@ -160,7 +160,7 @@ def main(argv):
                       f"win/song {np.median([r['n_win'] for r in rows]):.0f}")
                 if per_song and label == "supply everywhere":
                     base = [score(c, stems, gate, False, False) for c in caches]
-                    for c, r, b in zip(caches, rows, base):
+                    for c, r, b in zip(caches, rows, base, strict=True):
                         print(f"      {c['song'][:36]:36s} P {b['song_P']:.2f}->{r['song_P']:.2f} "
                               f"cov {b['song_cov']:.2f}->{r['song_cov']:.2f} | win P {b['win_P']:.2f}->{r['win_P']:.2f} "
                               f"cov {b['win_cov']:.2f}->{r['win_cov']:.2f} dens {b['win_density']:.2f}->{r['win_density']:.2f} "

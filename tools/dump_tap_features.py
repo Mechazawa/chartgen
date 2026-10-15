@@ -10,7 +10,6 @@ re-decoding audio per guess.
 """
 import argparse
 import json
-import statistics
 import sys
 import time
 from pathlib import Path

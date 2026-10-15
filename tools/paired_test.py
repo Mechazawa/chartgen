@@ -27,7 +27,7 @@ def paired_verdict(a: list, b: list, label_a: str, label_b: str) -> str:
     """One-line verdict on whether two per-song score lists really differ."""
     from scipy.stats import wilcoxon
 
-    deltas = [x - y for x, y in zip(a, b)]
+    deltas = [x - y for x, y in zip(a, b, strict=True)]
     if all(abs(d) < 1e-12 for d in deltas):
         return f"{label_a} vs {label_b}: identical on every song"
     stat, p = wilcoxon(a, b)
@@ -44,7 +44,7 @@ def main(argv=None):
     ap.add_argument("caches", type=Path, nargs="+")
     args = ap.parse_args(argv)
 
-    from sweep_taps import softness, FEATURES
+    from sweep_taps import softness
     from chartgen.taps import phrases
 
     songs = [s for p in args.caches

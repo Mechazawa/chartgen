@@ -129,7 +129,7 @@ def main():
     print(f"{len(rows)} rated songs "
           f"(total weight {w.sum():.0f}, reputable/full-tier emphasised)")
     print(f"weighted MAE {mae:.2f} tiers; within +/-1 tier: {within1:.0%}")
-    for name, value in zip(FEATURE_ORDER + ("intercept",), coef):
+    for name, value in zip(FEATURE_ORDER + ("intercept",), coef, strict=True):
         print(f"   {name:>10}: {value:+.3f}")
 
     worst = sorted(rows, key=lambda r: -abs(

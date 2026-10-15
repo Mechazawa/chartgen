@@ -77,7 +77,7 @@ def main(argv=None):
     results = []
     for wa, wb, wl in ((1, 1, 0.5), (1, 0, 0), (0, 1, 0), (1, 1, 0),
                        (0.5, 1, 0.5), (1, 0.5, 0.5), (0, 1, 0.5), (0.5, 1, 0)):
-        weights = dict(zip(FEATURES, (wa, wb, wl)))
+        weights = dict(zip(FEATURES, (wa, wb, wl), strict=True))
         for soft_z, min_run, max_gap, share in itertools.product(
             (0.25, 0.4, 0.5, 0.65, 0.8), (4, 6, 8), (1.0, 2.0), (0.3, 0.4, 0.5),
         ):

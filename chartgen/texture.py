@@ -75,7 +75,7 @@ def smooth_chord_shapes(notes, resolution: int):
             fretted = [n for n in group if n[1] != OPEN]
             others = [n for n in group if n[1] == OPEN]
             group = [(tick, lane, note[2])
-                     for lane, note in zip(prev_shape, fretted)] + others
+                     for lane, note in zip(prev_shape, fretted, strict=True)] + others
             shape = prev_shape
         out.extend(group)
         if len(shape) > 1:
@@ -122,7 +122,7 @@ def narrow_wide_chords(notes, resolution: int):
                 new -= 1
             used.add(new)
             narrowed.append(new)
-        remap = dict(zip(shape[1:], narrowed))
+        remap = dict(zip(shape[1:], narrowed, strict=True))
         groups[tick] = [(t, remap.get(lane, lane), sus)
                         for t, lane, sus in groups[tick]]
     for tick in ticks:

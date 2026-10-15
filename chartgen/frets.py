@@ -2,6 +2,8 @@
 stretches, fret-jump smoothing to human hand movement, and the step-share
 metric behind them.
 """
+from itertools import pairwise
+
 import numpy as np
 
 OPEN = 7
@@ -78,8 +80,6 @@ def relane_by_brightness(notes, tempo, melodic, sr):
     a re-laned stretch become fretted (they were register artifacts of
     the octave-lift, not punctuation).
     """
-    import numpy as np
-
     if not notes or melodic is None or not len(melodic):
         return notes, 0
     stretches, ticks = degenerate_stretches(notes, tempo.resolution)
@@ -118,7 +118,7 @@ def relane_by_brightness(notes, tempo, melodic, sr):
             smooth[k] = sorted(lanes[k - 1:k + 2])[1]
         if len(set(int(x) for x in smooth)) < 3:
             continue  # no variety gained: leave the honest monotone
-        for k, lane in zip(range(lo, hi + 1), smooth):
+        for k, lane in zip(range(lo, hi + 1), smooth, strict=True):
             relane[ticks[k]] = int(lane)
         changed += 1
     if not relane:
@@ -190,7 +190,7 @@ def step_share(notes, threshold: int = 3) -> float:
         by_tick.setdefault(tick, []).append(lane)
     singles = [v[0] for _, v in sorted(by_tick.items())
                if len(v) == 1 and v[0] != OPEN]
-    steps = [abs(b - a) for a, b in zip(singles, singles[1:])]
+    steps = [abs(b - a) for a, b in pairwise(singles)]
     if not steps:
         return 0.0
     return sum(1 for s in steps if s >= threshold) / len(steps)

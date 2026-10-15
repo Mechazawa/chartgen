@@ -90,7 +90,7 @@ def main(argv=None):
     within1 = float(np.mean(np.abs(pred - y) <= 1))
     print(f"fit: MAE {mae:.2f}, {within1:.0%} within +/-1 tier")
     print("coef:", {k: round(float(c), 3)
-                    for k, c in zip(FEATURE_ORDER + ("intercept",), coef)})
+                    for k, c in zip(FEATURE_ORDER + ("intercept",), coef, strict=True)})
 
     out = root / "chartgen/rating_coeffs.json"
     out.write_text(json.dumps({

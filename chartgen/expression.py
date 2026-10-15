@@ -11,6 +11,9 @@ them inconsistently per tier, so they never pass through it. Natural HOPOs
 need no markup at all; they are implicit in note spacing.
 """
 
+from itertools import pairwise
+
+
 def hopo_threshold(resolution: int) -> int:
     """Tick gap under which a different-fret single note is already a HOPO.
 
@@ -150,7 +153,7 @@ def top_up_sustains(
     floor = resolution // 2
 
     ticks = sorted({t for t, _, _ in notes})
-    next_tick = dict(zip(ticks, ticks[1:]))
+    next_tick = dict(pairwise(ticks))
     held = {t for t, _, sus in notes if sus > 0}
     target = int(round(target_share * len(ticks)))
     if len(held) >= target:

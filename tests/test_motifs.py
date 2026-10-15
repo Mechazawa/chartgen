@@ -3,6 +3,7 @@
 Run: python -m tests.test_motifs
 """
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -58,7 +59,7 @@ def invariants(notes, res=RES):
         seen.add((t, lane))
         by_tick.setdefault(t, []).append(sus)
     ticks = sorted(by_tick)
-    for a, b in zip(ticks, ticks[1:]):
+    for a, b in pairwise(ticks):
         assert max(by_tick[a]) <= b - a, \
             f"sustain at {a} overlaps next note at {b}"
 
@@ -132,10 +133,10 @@ def test_chunk_rolls_structures_a_shapeless_run():
     out = chunk_rolls(notes, RES)
     new = [lanes_at(out, i * step)[0] for i in range(len(lanes))]
     assert new != lanes, "run should have been restructured"
-    deltas = [b - a for a, b in zip(new, new[1:])]
+    deltas = [b - a for a, b in pairwise(new)]
     assert all(d != 0 for d in deltas), f"no same-lane repeats inside a run: {new}"
     nz = [d for d in deltas if d != 0]
-    reversals = sum(1 for a, b in zip(nz, nz[1:]) if a * b < 0)
+    reversals = sum(1 for a, b in pairwise(nz) if a * b < 0)
     assert reversals <= 3, f"still zigzagging: {new}"
     assert all(abs(d) <= 2 for d in deltas), f"jump introduced: {new}"
     invariants(out)
@@ -264,7 +265,7 @@ def test_chord_walk_takes_the_rung_ladder():
         walk += [(i * beat, anchor, 0), (i * beat, anchor + 1, 0)]
     out = shape_chord_walks(walk, RES)
     shapes = [tuple(lanes_at(out, i * beat)) for i in range(4)]
-    for a, b in zip(shapes, shapes[1:]):
+    for a, b in pairwise(shapes):
         assert b in [tuple(r) for r in CHORD_RUNGS], b
         moved = len(set(a) ^ set(b)) // 2
         assert moved == 1, f"{a}->{b} should move exactly one finger"
@@ -720,7 +721,7 @@ def _tone_track(t, note_ticks, freqs, dur=0.12):
     """Synthetic melodic audio: a sine burst at each note's time."""
     total = t.beat_to_time(note_ticks[-1] / RES) + 1.0
     buf = np.zeros(int(total * SR_TEST), dtype=np.float32)
-    for tick, f in zip(note_ticks, freqs):
+    for tick, f in zip(note_ticks, freqs, strict=True):
         a = int(t.beat_to_time(tick / RES) * SR_TEST)
         n = int(dur * SR_TEST)
         x = np.arange(n)
@@ -788,7 +789,6 @@ def test_brightness_respects_chords_sustains_and_opens():
 # ---------------------------------------------------------------- guitar
 
 from chartgen.guitar import (  # noqa: E402
-    MAX_CHORD_SHARE,
     chordify,
     guitar_share,
     second_voices,
@@ -808,7 +808,6 @@ def test_second_voices_needs_comparable_pair():
 
 
 def test_chordify_promotes_a_run_uniformly():
-    t = steady()
     eighth = RES // 2
     run = [(i * eighth, 1, 0) for i in range(6)]
     filler = [((20 + i) * RES, 0, 0) for i in range(20)]  # keeps the cap open
@@ -825,7 +824,6 @@ def test_chordify_promotes_a_run_uniformly():
 
 
 def test_chordify_skips_thin_evidence_and_short_runs():
-    t = steady()
     eighth = RES // 2
     run = [(i * eighth, 1, 0) for i in range(6)]
     filler = [((20 + i) * RES, 0, 0) for i in range(20)]
@@ -839,7 +837,6 @@ def test_chordify_skips_thin_evidence_and_short_runs():
 
 
 def test_chordify_keeps_one_direction_per_run():
-    t = steady()
     eighth = RES // 2
     # lanes 1,1,1,4: +2 fits three of four; the outlier must stay single
     lanes = [1, 1, 1, 4]

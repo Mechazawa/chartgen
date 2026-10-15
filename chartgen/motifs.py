@@ -26,6 +26,7 @@ stray-push settling), mirroring texture.consolidate_gallops: a repeated
 figure is the rhythm, a one-off consolidates.
 """
 import collections
+from itertools import pairwise
 
 OPEN = 7
 
@@ -190,11 +191,11 @@ def chunk_rolls(notes, resolution: int):
         distinct = set(lanes)
         if len(distinct) <= 2:
             continue  # trill or machine-gun; other motifs own those
-        deltas = [b - a for a, b in zip(lanes, lanes[1:])]
+        deltas = [b - a for a, b in pairwise(lanes)]
         nz = [d for d in deltas if d != 0]
         if len(nz) < 3:
             continue
-        reversals = sum(1 for a, b in zip(nz, nz[1:]) if a * b < 0)
+        reversals = sum(1 for a, b in pairwise(nz) if a * b < 0)
         rate = reversals / max(1, len(nz) - 1)
         if rate < RUN_REVERSAL_RATE:
             continue  # already directional enough to read as a line
@@ -209,7 +210,7 @@ def chunk_rolls(notes, resolution: int):
         for period in (2, 3, 4):
             if len(lanes) <= period:
                 break
-            hits = sum(1 for a, b in zip(lanes, lanes[period:]) if a == b)
+            hits = sum(1 for a, b in zip(lanes, lanes[period:], strict=False) if a == b)
             if hits / (len(lanes) - period) >= 0.75:
                 periodic = True
                 break
@@ -220,7 +221,7 @@ def chunk_rolls(notes, resolution: int):
     relane: dict[int, int] = {}
     budget = max(RUN_MIN_LEN * 2, int(len(pos) * RUN_BUDGET_SHARE))
     touched = 0
-    for rate, run, lanes in sorted(candidates, key=lambda c: -c[0]):
+    for _, run, lanes in sorted(candidates, key=lambda c: -c[0]):
         if touched + len(run) > budget:
             continue
         touched += len(run)
@@ -241,7 +242,7 @@ def chunk_rolls(notes, resolution: int):
             dirn = (1 if trend > 0 else -1 if trend < 0
                     else (-prev_dir if prev_dir else 1))
 
-            def fit(start, d):
+            def fit(start, d, length=length):
                 """Clamp a chunk start so the whole chunk stays on the neck."""
                 if d > 0:
                     return max(0, min(start, 5 - length))
@@ -264,7 +265,7 @@ def chunk_rolls(notes, resolution: int):
             k = end
             chunk_i += 1
             prev_start, prev_dir = start, dirn
-        for i, lane in zip(run, new):
+        for i, lane in zip(run, new, strict=True):
             if lane != _single_lane(pos[i]):
                 relane[pos[i][0]] = lane
     if not relane:

@@ -20,7 +20,6 @@ Each song -> work/framecache/<name>.npz + one manifest line.
     python tools/dump_frame_features.py --start 0 --end 200
 """
 import argparse
-import json
 import re
 import sys
 import time
@@ -42,7 +41,7 @@ def named_solo_spans(events_block, ticks, resolution):
     sections = section_ticks(events_block)
     bounds = [t for t, _ in sections] + [max(ticks) + 1 if ticks else 0]
     spans = []
-    for (start, name), end in zip(sections, bounds[1:]):
+    for (start, name), end in zip(sections, bounds[1:], strict=True):
         if SOLO_NAME.search(name):
             spans.append((start, end))
     # merge adjacent named parts (Solo A / Solo B / Solo C)

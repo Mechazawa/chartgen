@@ -76,7 +76,6 @@ def study(chart: Path):
                 settled = rolling
         prev_time = now
 
-    bars = max(1.0, (at(ticks[-1]) - at(ticks[0])) / 2.0 / 4 * 2)  # ~seconds/2 per bar guess
     duration_bars = max(1.0, (ticks[-1] - ticks[0]) / res / 4)
     return {
         "outside": outside / max(1, total),

@@ -61,9 +61,10 @@ def main():
 
     # steady kick on every beat so beat-trackers have something to lock onto
     beat = 60.0 / args.bpm
+    kick = pluck(55.0, 0.12) * 1.5
     for i in range(int(args.seconds / beat) + 1):
         start = int(i * beat * SR)
-        buf[start:start + len(k := pluck(55.0, 0.12))] += k * 1.5
+        buf[start:start + len(kick)] += kick
 
     buf = buf[:total]
     buf /= np.max(np.abs(buf)) * 1.05

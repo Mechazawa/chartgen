@@ -12,7 +12,6 @@ and quiet controls report the false-fire rate separately.
     python tools/sweep_windows.py
 """
 import itertools
-import random
 import sys
 from pathlib import Path
 

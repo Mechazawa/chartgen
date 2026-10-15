@@ -11,6 +11,7 @@ the replacement rule is chosen from evidence rather than intuition.
 import argparse
 import statistics
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 from study_solos import blocks, lyric_ticks, note_ticks, solo_spans, RES_RE, NOTE_RE, OPEN
@@ -40,7 +41,7 @@ def gap_features(path: Path):
 
     rows = []
     edges = [0] + words + [last]
-    for a, b2 in zip(edges, edges[1:]):
+    for a, b2 in pairwise(edges):
         beats = (b2 - a) / res
         if beats < 8:
             continue

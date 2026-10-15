@@ -19,6 +19,9 @@ strummed line is imperceptible at best and confusing at worst, and human
 taps arrive in runs. In .chart a tap is `N 6 0` at the note's tick; in CH
 it plays without strumming and overrides HOPO state.
 """
+
+from itertools import pairwise
+
 import numpy as np
 
 from .tempo import BEAT_LAG_S
@@ -319,7 +322,7 @@ def detect(notes, y, sr, tempo, progress=lambda m: None,
         stems_of = [r["stem"] for r in followed]
     else:
         bounds = [t for t, _ in sorted(section_marks)] + [ticks[-1] + 1]
-        spans = list(zip(bounds, bounds[1:]))
+        spans = list(pairwise(bounds))
         spans_s = [(tempo.beat_to_time(a / res), tempo.beat_to_time(b / res))
                    for a, b in spans]
     import librosa
@@ -334,7 +337,7 @@ def detect(notes, y, sr, tempo, progress=lambda m: None,
         rule = "followed-instrument" if stems_of else "keys/synth"
         fallback = 0
         decisions = []
-        for i, ((a, b), score) in enumerate(zip(spans, keyed)):
+        for i, score in enumerate(keyed):
             stem = stems_of[i] if stems_of else None
             if stem in TAP_STEMS:
                 decisions.append(True)
@@ -347,7 +350,7 @@ def detect(notes, y, sr, tempo, progress=lambda m: None,
                 fallback += bool(stems_of)
         if stems_of:
             weights = [b - a for a, b in spans]
-            bass_main = (sum(w for w, st in zip(weights, stems_of) if st == "bass")
+            bass_main = (sum(w for w, st in zip(weights, stems_of, strict=True) if st == "bass")
                          > 0.5 * sum(weights))
             for i, d in enumerate(decisions):
                 if d is not None:
@@ -368,7 +371,7 @@ def detect(notes, y, sr, tempo, progress=lambda m: None,
                     lp = next(weights[j] for j in range(i - 1, -1, -1) if decisions[j] is not None)
                     ln = next(weights[j] for j in range(i + 1, len(decisions)) if decisions[j] is not None)
                     decisions[i] = prev if lp >= ln else nxt
-        for i, ((a, b), score) in enumerate(zip(spans, keyed)):
+        for i, (a, b) in enumerate(spans):
             inside = [n for n in notes if a <= n[0] < b]
             if not inside:
                 continue
@@ -393,7 +396,7 @@ def detect(notes, y, sr, tempo, progress=lambda m: None,
         centroid = librosa.feature.spectral_centroid(y=other_ds, sr=22050)[0]
         cen_times = librosa.times_like(centroid, sr=22050)
         fg = foreground_by_span(spans_s, mono, stemsmod.SR, centroid, cen_times)
-        for (a, b), (share, bright) in zip(spans, fg):
+        for (a, b), (share, bright) in zip(spans, fg, strict=True):
             inside = [n for n in notes if a <= n[0] < b]
             if not inside:
                 continue
