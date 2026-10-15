@@ -170,13 +170,16 @@ def _separate_demucs(audio_path: str, progress) -> dict | None:
 
 def _separate_sw(audio_path: str, progress) -> dict | None:
     """Six SW stems, remapped onto the Demucs contract (see module docs)."""
-    try:
-        import librosa
-        import soundfile as sf
+    import librosa
 
+    try:
         y, _ = librosa.load(str(audio_path), sr=SR, mono=False)
-        if y.ndim == 1:
-            y = np.stack([y, y])
+    except Exception as error:
+        progress(f"      could not read the audio for separation ({type(error).__name__}: {error})")
+        return None
+    if y.ndim == 1:
+        y = np.stack([y, y])
+    try:
         raw = _separate_sw_inprocess(y, progress)
     except Exception as error:
         progress(f"      SW in-process separation unavailable "
