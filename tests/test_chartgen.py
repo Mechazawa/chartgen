@@ -184,22 +184,26 @@ def test_ghl_tiers_keep_expert_positions_and_tier_shape_limits():
                "Medium": [c for c in range(64) if c.bit_count() <= 2], "Easy": white}
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "ghl_model.pt"
-        torch.save({"shape": ghl.ShapeNet().state_dict(), "reduce": ghl.ReduceNet().state_dict(),
+        torch.save({"timing": ghl.TimingNet().state_dict(), "timing_threshold": -1e9,
+                    "shape": ghl.ShapeNet().state_dict(), "reduce": ghl.ReduceNet().state_dict(),
                     "allowed": allowed, "transitions": torch.zeros(64, 64),
                     "decode_weights": (0.5, 1.0),
                     "keep_share": {"Hard": 0.75, "Medium": 0.5, "Easy": 0.35},
-                    "config": {"shape": {}, "reduce": {}}}, path)
+                    "config": {"timing": {}, "shape": {}, "reduce": {}}}, path)
         saved_path, ghl.MODEL_PATH = ghl.MODEL_PATH, path
         ghl._MODELS.clear()
         try:
             expert = [(tick * RESOLUTION // 2, tick % 5, 0) for tick in range(300)]
             events = [(0.5 + i * 0.25, 0.7 + i * 0.25, 40 + i % 24, 0.8) for i in range(300)]
-            out = ghl.chart_tiers(expert, steady(n=200), events, {"guitar": events})
+            tempo = steady(n=200)
+            out = ghl.chart_tiers(expert, tempo, events, {"guitar": events})
         finally:
             ghl.MODEL_PATH = saved_path
             ghl._MODELS.clear()
     expert_ticks = {t for t, _, _ in out["ExpertGHLGuitar"]}
-    assert expert_ticks == {t for t, _, _ in expert}
+    # The mix and guitar onsets coincide, so each is one candidate, and all
+    # clear the threshold and the minimum gap.
+    assert expert_ticks == {tempo.quantize(start, 4) for start, *_ in events}
     for tier, share in (("Hard", 0.75), ("Medium", 0.5), ("Easy", 0.35)):
         kept = {t for t, _, _ in out[f"{tier}GHLGuitar"]}
         assert kept <= expert_ticks, tier

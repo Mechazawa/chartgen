@@ -4,9 +4,11 @@ Lanes 0-5 are W1 W2 W3 B1 B2 B3 and 7 is open, in the same (tick, lane,
 sustain) tuples the 5-fret chart uses, so every pass that only reads ticks
 and lane identity works on either part.
 
-Two models trained on the official FreeStyleGames charts (tools/train_ghl.py):
-ShapeNet picks the Expert shape at each position from the pitches heard
-around it, ReduceNet derives Hard, Medium and Easy from the Expert shapes.
+Three models trained on the official FreeStyleGames charts
+(tools/train_ghl.py): TimingNet picks the Expert note times from the onsets
+of every stream, ShapeNet picks the Expert shape at each of them from the
+pitches heard around it, and ReduceNet derives Hard, Medium and Easy from
+the Expert shapes.
 """
 from pathlib import Path
 
@@ -28,6 +30,10 @@ STATS = 5
 SCALARS = 6
 N_FEATURES = 3 * ROWS * STATS + SCALARS
 WINDOW = 256
+MERGE_S = 0.03  # onsets closer than this are one note-time candidate
+GAP_S = 0.06  # the closest two official Expert notes ever sit
+GRID = 4  # notes snap to 16ths
+N_TIMING = N_FEATURES - 2 + 5
 
 
 def shape_class(lanes) -> int:
@@ -114,6 +120,48 @@ def features(times: np.ndarray, beat_phase: np.ndarray, sustain_s: np.ndarray,
     return np.hstack([stats, stats - before, after - stats, scalars]).astype(np.float32)
 
 
+def candidates(mix_events, stem_events: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Note-time candidates: the onsets of the mix and every stem merged
+    into MERGE_S clusters, as (first onset, events in the cluster)."""
+    onsets = np.sort([e[0] for events in [mix_events, *stem_events.values()] for e in events])
+    if not len(onsets):
+        return onsets, onsets
+    first = [0]
+    for i in range(1, len(onsets)):
+        if onsets[i] - onsets[first[-1]] > MERGE_S:
+            first.append(i)
+    first = np.array(first)
+    return onsets[first], np.diff(first, append=len(onsets)).astype(np.float32)
+
+
+def timing_features(times: np.ndarray, counts: np.ndarray, tempo, mix_events,
+                    stem_events: dict) -> np.ndarray:
+    """[N, N_TIMING] per candidate: the pitch statistics of features(), the
+    gaps to the neighbouring candidates, how many onsets it merges, and
+    where it sits on the beat grid."""
+    beat = np.array([tempo.time_to_beat(t) for t in times])
+    x = features(times, beat % 1, np.zeros_like(times), mix_events, stem_events)
+    x = np.delete(x, [N_FEATURES - 4, N_FEATURES - 1], axis=1)  # sustain and key shift
+    grid = np.stack([np.log1p(counts), np.abs(beat * 4 - np.round(beat * 4)),
+                     np.abs(beat * 3 - np.round(beat * 3)), np.sin(np.pi * beat), np.cos(np.pi * beat)], 1)
+    return np.hstack([x, grid]).astype(np.float32)
+
+
+def pick_times(logits: np.ndarray, times: np.ndarray, threshold: float) -> np.ndarray:
+    """The candidates above threshold, most likely first, skipping any
+    within GAP_S of one already picked."""
+    taken = np.zeros(len(times), bool)
+    picked = []
+    for i in np.argsort(-logits):
+        if logits[i] <= threshold:
+            break
+        if not taken[i]:
+            picked.append(times[i])
+            low, high = np.searchsorted(times, [times[i] - GAP_S, times[i] + GAP_S])
+            taken[low:high] = True
+    return np.sort(picked)
+
+
 class _Encoder(nn.Module):
     def __init__(self, n_in: int, width: int, layers: int, dropout: float):
         super().__init__()
@@ -156,6 +204,19 @@ class ReduceNet(nn.Module):
         return out.view(*out.shape[:2], len(TIERS), 1 + (1 << BUTTONS))
 
 
+class TimingNet(nn.Module):
+    """Per note-time candidate: the logit that the official chart has an
+    Expert note there."""
+
+    def __init__(self, width: int = 128, layers: int = 4, dropout: float = 0.2):
+        super().__init__()
+        self.encoder = _Encoder(N_TIMING, width, layers, dropout)
+        self.head = nn.Linear(width, 1)
+
+    def forward(self, x, pad):
+        return self.head(self.encoder(x, pad))
+
+
 def reduce_inputs(shapes: np.ndarray, scalars: np.ndarray) -> np.ndarray:
     return np.concatenate([np.eye(1 << BUTTONS, dtype=np.float32)[shapes], scalars], axis=1)
 
@@ -183,11 +244,12 @@ _MODELS: dict = {}
 def _models(device: str):
     if device not in _MODELS:
         saved = torch.load(MODEL_PATH, map_location=device)
-        shape_net = ShapeNet(**saved["config"]["shape"])
-        reduce_net = ReduceNet(**saved["config"]["reduce"])
-        shape_net.load_state_dict({k: v.float() for k, v in saved["shape"].items()})
-        reduce_net.load_state_dict({k: v.float() for k, v in saved["reduce"].items()})
-        _MODELS[device] = (shape_net.to(device).eval(), reduce_net.to(device).eval(), saved)
+        nets = []
+        for name, net in (("timing", TimingNet), ("shape", ShapeNet), ("reduce", ReduceNet)):
+            model = net(**saved["config"][name])
+            model.load_state_dict({k: v.float() for k, v in saved[name].items()})
+            nets.append(model.to(device).eval())
+        _MODELS[device] = (*nets, saved)
     return _MODELS[device]
 
 
@@ -199,18 +261,28 @@ def _masked(logits: np.ndarray, allowed) -> np.ndarray:
 
 
 def chart_tiers(expert, tempo, mix_events, stem_events) -> dict[str, list]:
-    """{"ExpertGHLGuitar": notes, "HardGHLGuitar": ...} on the 5-fret Expert's
-    positions and sustains, or {} when no trained model ships."""
-    if not MODEL_PATH.is_file() or not expert:
+    """{"ExpertGHLGuitar": notes, "HardGHLGuitar": ...}, or {} when no
+    trained model ships. Sustains come from the 5-fret Expert note on the
+    same 16th, cut short of the next 6-fret note."""
+    candidate_times, counts = candidates(mix_events, stem_events)
+    if not MODEL_PATH.is_file() or not len(candidate_times):
         return {}
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    shape_net, reduce_net, saved = _models(device)
+    timing_net, shape_net, reduce_net, saved = _models(device)
     allowed = saved["allowed"]
     res = tempo.resolution
-    sustain_of: dict[int, int] = {}
+    x = timing_features(candidate_times, counts, tempo, mix_events, stem_events)
+    picked = pick_times(windowed(timing_net, x, device)[:, 0], candidate_times, saved["timing_threshold"])
+    ticks = np.array(sorted({tempo.quantize(t, GRID) for t in picked}))
+    if not len(ticks):
+        return {}
+    five_fret: dict[int, int] = {}
     for tick, _, sus in expert:
-        sustain_of[tick] = max(sustain_of.get(tick, 0), sus)
-    ticks = np.array(sorted(sustain_of))
+        snapped = round(tick * GRID / res) * res // GRID
+        five_fret[snapped] = max(five_fret.get(snapped, 0), sus)
+    room = np.diff(ticks, append=ticks[-1] + 4 * res) - res // GRID
+    sustain_of = {int(t): sus if (sus := min(five_fret.get(int(t), 0), int(r))) >= res // GRID else 0
+                  for t, r in zip(ticks, room, strict=True)}
     times = np.array([tempo.beat_to_time(t / res) for t in ticks])
     sustain_s = np.array([tempo.beat_to_time((t + sustain_of[t]) / res) for t in ticks]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)

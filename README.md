@@ -25,8 +25,8 @@ Everything runs on your own PC. No audio is ever uploaded.
   charts. A 0–6 `diff_guitar` rating is written for the song list.
 - **A 6-fret part too.** The same song also gets a Guitar Hero Live chart
   for 6-fret controllers (three white and three black buttons), Expert to
-  Easy. A model trained on the 562 official Guitar Hero Live and GHTV charts
-  picks the buttons; the timing is the 5-fret chart's.
+  Easy. Models trained on the 561 official Guitar Hero Live and GHTV charts
+  pick the note times and the buttons.
 - **The details that make a chart feel charted.** Sustains from real note
   lengths, HOPOs, star power phrases, numbered practice sections, tap notes
   on synth and piano parts, solo markers where a lead break is found, and

@@ -1,4 +1,4 @@
-"""Train the GHL shape and reduce models on the official charts.
+"""Train the GHL timing, shape and reduce models on the official charts.
 
 Input is the per-song records from tools/build_ghl_dataset.py, plus the
 song folders for the audio delay in each song.ini. Songs are
@@ -27,11 +27,12 @@ import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from chartgen import ghl
+from chartgen import ghl, tempo
 
 # The song.ini delay is where the chart meets the audio; transcribed onsets
 # only refine it, since on periodic music their mode can sit a beat away.
 OFFSET_REFINE_S, OFFSET_BIN_S = 0.05, 0.005
+MATCH_S = 0.05  # a picked note this close to an official one is a hit
 HOLDOUT_SHARE = 0.1
 VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
@@ -94,11 +95,28 @@ def song_arrays(record: dict, delay_s: float) -> dict:
             "tier_shapes": tier_shapes, "offset": offset}
 
 
+def timing_arrays(record: dict, delay_s: float) -> tuple[dict, tuple]:
+    """({"x", "label"} per note-time candidate, (candidate times, official
+    note times, beat grid)). The label marks the candidate nearest each
+    official Expert note, when within MATCH_S."""
+    beats, pickup = record["tempo"]
+    grid = tempo.TempoMap(beat_times=np.asarray(beats), resolution=tempo.RESOLUTION, pickup_beats=int(pickup))
+    times, counts = ghl.candidates(record["mix"], record["stems"])
+    chart = record["chart"]
+    official = np.array([chart.seconds(t) for t in sorted({t for t, _, _ in chart.tiers["Expert"]})]) + delay_s
+    k = np.clip(np.searchsorted(times, official), 1, len(times) - 1)
+    nearest = np.where(np.abs(times[k] - official) < np.abs(times[k - 1] - official), k, k - 1)
+    label = np.zeros(len(times), dtype=np.float32)
+    label[nearest[np.abs(times[nearest] - official) <= MATCH_S]] = 1
+    x = ghl.timing_features(times, counts, grid, record["mix"], record["stems"])
+    return {"x": x.astype(np.float16), "label": label}, (times, official, grid)
+
+
 def crops(songs, rng, batch):
     picks = [songs[rng.randrange(len(songs))] for _ in range(batch)]
     out = []
     for song in picks:
-        begin = rng.randrange(max(1, len(song["shapes"]) - ghl.WINDOW + 1))
+        begin = rng.randrange(max(1, len(song["x"]) - ghl.WINDOW + 1))
         out.append({k: v[begin:begin + ghl.WINDOW] for k, v in song.items() if k != "offset"})
     return out
 
@@ -174,6 +192,62 @@ def fit(net, configs, train_songs, val_songs, steps, batch, device, loss_of, run
             best = (loss, model, config)
     print(f"{net.__name__}: kept {best[2]} at validation loss {best[0]:.3f}", flush=True)
     return best[1], {k: v for k, v in best[2].items() if k != "lr"}
+
+
+def timing_loss(device):
+    bce = nn.BCEWithLogitsLoss(reduction="none")
+
+    def loss_of(model, items):
+        x, pad = stack(items, "x", np.float32)
+        y, _ = stack(items, "label", np.float32)
+        out = model(x.to(device), pad.to(device)).float()[..., 0]
+        real, y = ~pad.to(device), y.to(device)
+        guess, truth = out[real] > 0, y[real] > 0
+        metrics = {"precision": (guess & truth).sum().item() / max(1, guess.sum().item()),
+                   "recall": (guess & truth).sum().item() / max(1, truth.sum().item())}
+        return bce(out, y)[real].mean(), metrics
+    return loss_of
+
+
+def snapped_notes(logits, times, grid, threshold) -> np.ndarray:
+    """Seconds of the picked notes after the 16th snap chart_tiers applies."""
+    ticks = sorted({grid.quantize(t, ghl.GRID) for t in ghl.pick_times(logits, times, threshold)})
+    return np.array([grid.beat_to_time(t / grid.resolution) for t in ticks])
+
+
+def timing_threshold(timing_net, songs, extras, device) -> float:
+    """The keep threshold at which the validation songs get as many picked
+    notes as the official charts have."""
+    logits = [ghl.windowed(timing_net, s["x"].astype(np.float32), device)[:, 0] for s in songs]
+    target = sum(len(official) for _, official, _ in extras)
+    low, high = -8.0, 8.0
+    for _ in range(20):
+        middle = (low + high) / 2
+        count = sum(len(snapped_notes(lg, times, grid, middle))
+                    for lg, (times, _, grid) in zip(logits, extras, strict=True))
+        low, high = (middle, high) if count > target else (low, middle)
+    return (low + high) / 2
+
+
+def near(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Per time in a: whether b has a time within MATCH_S."""
+    if not len(b):
+        return np.zeros(len(a), bool)
+    k = np.clip(np.searchsorted(b, a), 1, max(1, len(b) - 1))
+    return np.minimum(np.abs(b[k] - a), np.abs(b[k - 1] - a)) <= MATCH_S
+
+
+def evaluate_timing(timing_net, songs, extras, device, threshold, board) -> None:
+    hits = np.zeros(4)  # picked, picked near official, official, official near picked
+    for song, (times, official, grid) in zip(songs, extras, strict=True):
+        notes = snapped_notes(ghl.windowed(timing_net, song["x"].astype(np.float32), device)[:, 0],
+                              times, grid, threshold)
+        hits += [len(notes), near(notes, official).sum(), len(official), near(official, notes).sum()]
+    scores = {"timing_count": hits[0] / hits[2], "timing_precision": hits[1] / max(hits[0], 1),
+              "timing_recall": hits[3] / max(hits[2], 1)}
+    for name, value in scores.items():
+        print(f"holdout {name}: {value:.1%}")
+        board.add_scalar(f"holdout/{name}", value)
 
 
 def shape_loss(device):
@@ -347,6 +421,7 @@ def main(argv=None):
     holdout = set(random.Random(0).sample(keys, max(1, int(len(keys) * HOLDOUT_SHARE))))
     folders = {p.parent.name: p.parent for p in args.charts.rglob("notes.mid")}
     songs = {name: song_arrays(record, ini_delay_s(folders[name])) for name, record in records.items()}
+    timing = {name: timing_arrays(record, ini_delay_s(folders[name])) for name, record in records.items()}
     offsets = np.array([s["offset"] for s in songs.values()])
     print(f"{len(songs)} songs ({len(keys)} distinct), offsets median {np.median(offsets):.2f}s "
           f"range {offsets.min():.2f}..{offsets.max():.2f}s", flush=True)
@@ -356,12 +431,18 @@ def main(argv=None):
     val_songs = [s for n, s in songs.items() if song_key(n) in validation]
     test_songs = [s for n, s in songs.items() if song_key(n) in holdout]
     train_songs = random.Random(args.seed).sample(train_songs, round(len(train_songs) * args.train_share))
+    train_timing = [timing[n][0] for n in songs if song_key(n) not in holdout | validation]
+    train_timing = random.Random(args.seed).sample(train_timing, round(len(train_timing) * args.train_share))
+    val_timing = [timing[n] for n in songs if song_key(n) in validation]
+    test_timing = [timing[n] for n in songs if song_key(n) in holdout]
     print(f"train {len(train_songs)}, validation {len(val_songs)}, holdout {len(test_songs)}",
           flush=True)
 
     runs = args.runs / time.strftime("%Y-%m-%d_%H-%M-%S")
     rng = random.Random(2)
     configs = [{k: rng.choice(v) for k, v in SWEEP.items()} for _ in range(args.sweep)] or [args.config or DEFAULT]
+    timing_net, timing_config = fit(ghl.TimingNet, configs, train_timing, [t for t, _ in val_timing],
+                                    args.steps, args.batch, device, timing_loss(device), runs / "timing")
     shape_net, shape_config = fit(ghl.ShapeNet, configs, train_songs, val_songs, args.steps,
                                   args.batch, device, shape_loss(device), runs / "shape")
     reduce_net, reduce_config = fit(ghl.ReduceNet, configs, train_songs, val_songs, args.steps // 2,
@@ -374,12 +455,16 @@ def main(argv=None):
     moves = transitions(train_songs)
     weights = pick_decoding(shape_net, val_songs, device, allowed["Expert"], moves)
     board.add_text("decode_weights", str(weights))
+    threshold = timing_threshold(timing_net, *zip(*val_timing, strict=True), device)
+    evaluate_timing(timing_net, *zip(*test_timing, strict=True), device, threshold, board)
     evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weights, board)
-    torch.save({"shape": {k: v.half() for k, v in shape_net.state_dict().items()},
+    torch.save({"timing": {k: v.half() for k, v in timing_net.state_dict().items()},
+                "timing_threshold": threshold,
+                "shape": {k: v.half() for k, v in shape_net.state_dict().items()},
                 "reduce": {k: v.half() for k, v in reduce_net.state_dict().items()},
                 "allowed": allowed, "transitions": torch.from_numpy(moves), "decode_weights": weights,
                 "keep_share": keep_share(train_songs),
-                "config": {"shape": shape_config, "reduce": reduce_config},
+                "config": {"timing": timing_config, "shape": shape_config, "reduce": reduce_config},
                 "holdout": sorted(holdout)}, args.out)
     print(f"wrote {args.out}")
     return 0
