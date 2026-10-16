@@ -246,7 +246,7 @@ class ShapeNet(nn.Module):
     and for the RELATIONS to the previous position's shape. forward()
     composes the factors' log probabilities, scaled by factor_weights, into
     scores over the 64 button bitmasks, adding the official charts' log
-    P(shape | its factors), then the relation logits."""
+    P(shape | its factors) and size_bias, then the relation logits."""
 
     def __init__(self, width: int = 128, layers: int = 4, dropout: float = 0.2):
         super().__init__()
@@ -254,6 +254,7 @@ class ShapeNet(nn.Module):
         self.head = nn.Linear(width, sum(FACTOR_SIZES) + RELATIONS)
         self.register_buffer("given_factors", torch.zeros(1 << BUTTONS))
         self.register_buffer("factor_weights", torch.ones(len(FACTOR_SIZES)))
+        self.register_buffer("size_bias", torch.zeros(FACTOR_SIZES[0]))
         self.register_buffer("factor_of", torch.from_numpy(FACTOR_OF), persistent=False)
 
     def heads(self, x, pad):
@@ -261,7 +262,7 @@ class ShapeNet(nn.Module):
 
     def forward(self, x, pad):
         *factors, relations = self.heads(x, pad)
-        score = self.given_factors.expand(*relations.shape[:-1], -1)
+        score = (self.given_factors + self.size_bias[self.factor_of[:, 0]]).expand(*relations.shape[:-1], -1)
         for k, logits in enumerate(factors):
             index = self.factor_of[:, k]
             score = score + self.factor_weights[k] * torch.where(

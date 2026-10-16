@@ -41,6 +41,7 @@ VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
 # Larger weights push the share of repeated shapes far past the official
 # charts' (about 38%) without improving agreement.
+SIZE_ROUNDS = 6
 DECODE_WEIGHTS = [(transition, relation) for transition in (0.0, 0.05, 0.1, 0.2)
                   for relation in (0.0, 0.1, 0.2, 0.3)]
 FACTOR_WEIGHTS = [(size, row, columns) for size in (1.0, 2.0, 3.0, 4.0) for row in (1.0, 1.5, 2.0)
@@ -365,6 +366,22 @@ def pick_factor_weights(shape_net, songs) -> tuple[float, ...]:
     return best[1]
 
 
+def calibrate_sizes(shape_net, songs, device, allowed, moves, weights) -> list[float]:
+    """Set shape_net's size_bias so the decoded validation songs use open
+    notes, singles, pairs and triples as often as the official charts.
+    Agreement alone favours the most common size, the single note, and left
+    the charts with 75% singles against the official 53%."""
+    sizes = lambda shapes: np.bincount(np.minimum(np.bitwise_count(shapes), 3), minlength=4) / len(shapes)
+    official = sizes(np.concatenate([s["shapes"] for s in songs]))
+    for _ in range(SIZE_ROUNDS):
+        preds = np.concatenate([ghl.viterbi(ghl.windowed(shape_net, s["x"].astype(np.float32), device), moves,
+                                            allowed, *weights) for s in songs])
+        shape_net.size_bias += torch.from_numpy(np.log((official + 1e-3) / (sizes(preds) + 1e-3))).float().to(device)
+    print(f"  size shares {np.round(sizes(preds), 3)} (official {np.round(official, 3)}), "
+          f"bias {shape_net.size_bias.cpu().numpy().round(2)}", flush=True)
+    return shape_net.size_bias.tolist()
+
+
 def pick_decoding(shape_net, songs, device, allowed, moves) -> tuple[float, float]:
     """The (transition, relation) weights with the best mean of size, row
     and move agreement on the validation songs, less how far the share of
@@ -507,6 +524,7 @@ def main(argv=None):
     moves = transitions(train_songs)
     weights = pick_decoding(shape_net, val_songs, device, allowed["Expert"], moves)
     board.add_text("decode_weights", str(weights))
+    board.add_text("size_bias", str(calibrate_sizes(shape_net, val_songs, device, allowed["Expert"], moves, weights)))
     threshold = timing_threshold(timing_net, *zip(*val_timing, strict=True), device)
     evaluate_timing(timing_net, *zip(*test_timing, strict=True), device, threshold, board)
     evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weights, keep_share(train_songs), board)
