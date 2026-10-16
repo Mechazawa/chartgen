@@ -37,6 +37,7 @@ from tools.train_ghl import ini_delay_s, song_key
 MATCH_S = 0.05
 DIFFS = tuple(DIFF_BASE)
 ROW_DIFFS = ("Expert", "Hard")
+BAR_SLOTS, REPEAT_BARS = 48, 8
 SHUFFLES = 20
 FLAG_Z = 2.0
 SHAPE_KEYS = ("exact", "size", "row", "direction")
@@ -177,6 +178,33 @@ def repeats(chart: GhlChart, delay: float) -> list[tuple[tuple[float, float], tu
     return [pair for spans in groups.values() for pair in itertools.combinations(spans, 2)]
 
 
+def bar_patterns(notes, bars: list[float]) -> list[tuple]:
+    """Per official bar (start seconds), its notes as (48th of the bar, shape)."""
+    out = []
+    for start, stop in pairwise(bars):
+        out.append(tuple((round((s - start) / (stop - start) * BAR_SLOTS), shape)
+                         for s, shape, _ in notes if start <= s < stop))
+    return out
+
+
+def bar_repeats(ours, theirs, bars: list[float]) -> dict[str, int]:
+    """How often a bar repeats one of the REPEAT_BARS bars before it note for
+    note, in each chart, and how often chartgen repeats where the official
+    chart does. A riff the charter plays four times reads as one figure."""
+    mine, official = bar_patterns(ours, bars), bar_patterns(theirs, bars)
+    out = {"bars": 0, "official": 0, "chartgen": 0, "kept": 0}
+    for j in range(1, len(bars) - 1):
+        earlier = range(max(0, j - REPEAT_BARS), j)
+        if len(official[j]) < 2:
+            continue
+        out["bars"] += 1
+        source = next((i for i in reversed(earlier) if official[i] == official[j]), None)
+        out["official"] += source is not None
+        out["chartgen"] += any(mine[i] == mine[j] for i in earlier) and len(mine[j]) > 1
+        out["kept"] += source is not None and mine[source] == mine[j] and len(mine[j]) > 1
+    return out
+
+
 def self_precision(notes, pairs) -> list[float]:
     """Per section pair, the share of the later repeat's notes that the earlier repeat also has."""
     def window(span):
@@ -250,6 +278,7 @@ def main(argv=None):
         random.Random(args.seed).shuffle(folders)
     folders = folders[:args.n or None]
     style = {who: {d: {} for d in ROW_DIFFS} for who in ("chartgen", "official")}
+    bar_totals = {d: {} for d in ROW_DIFFS}
     totals = {d: {} for d in DIFFS}
     flags = {"chartgen": [], "official": []}
     consistency = {"chartgen": [], "official": []}
@@ -281,6 +310,10 @@ def main(argv=None):
         for who in flags:
             flags[who].append(sum(abs(v) > FLAG_Z for v in z[who].values()))
         print(f"  style z chartgen/official: {zline(z)}")
+        bars = [official.seconds(t) + delay for t in official.bar_lines(max(t for t, *_ in official.tiers["Expert"]))]
+        for d in ROW_DIFFS:
+            for key, value in bar_repeats(ours[d], theirs[d], bars).items():
+                bar_totals[d][key] = bar_totals[d].get(key, 0) + value
         for who, tiers in (("chartgen", ours), ("official", theirs)):
             for d in ROW_DIFFS:
                 for key, value in row_style(tiers[d]).items():
@@ -307,6 +340,11 @@ def main(argv=None):
         t = totals[d]
         print(f"{d:6s} row on matches {t['row'] / max(t['matched'], 1):.0%}, all non-black {t['row_rest'] / max(t['matched'], 1):.0%}; "
               f"style chartgen {row_line(style['chartgen'][d])} | official {row_line(style['official'][d])}")
+    for d in ROW_DIFFS:
+        t = bar_totals[d]
+        print(f"{d:6s} bars repeating one of the {REPEAT_BARS} before: official {t['official'] / max(t['bars'], 1):.0%}, "
+              f"chartgen {t['chartgen'] / max(t['bars'], 1):.0%}; where official repeats, chartgen repeats the same bar "
+              f"{t['kept'] / max(t['official'], 1):.0%}")
     songs = max(len(flags["chartgen"]), 1)
     print(f"style flags (Expert, |z| > {FLAG_Z:g} against {population_stats['songs']} official training songs): "
           + "; ".join(f"{who} >= 1 {sum(n >= 1 for n in counts) / songs:.0%}, "
