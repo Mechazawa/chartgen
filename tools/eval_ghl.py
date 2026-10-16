@@ -187,6 +187,12 @@ def bar_patterns(notes, bars: list[float]) -> list[tuple]:
     return out
 
 
+def same_bar(a: tuple, b: tuple) -> bool:
+    """Same notes and shapes, each within one BAR_SLOTS slot: the tracked
+    beat grid jitters by more than half a slot."""
+    return len(a) == len(b) and all(abs(x - y) <= 1 and s == t for (x, s), (y, t) in zip(a, b, strict=True))
+
+
 def bar_repeats(ours, theirs, bars: list[float]) -> dict[str, int]:
     """How often a bar repeats one of the REPEAT_BARS bars before it note for
     note, in each chart, and how often chartgen repeats where the official
@@ -198,10 +204,10 @@ def bar_repeats(ours, theirs, bars: list[float]) -> dict[str, int]:
         if len(official[j]) < 2:
             continue
         out["bars"] += 1
-        source = next((i for i in reversed(earlier) if official[i] == official[j]), None)
+        source = next((i for i in reversed(earlier) if same_bar(official[i], official[j])), None)
         out["official"] += source is not None
-        out["chartgen"] += any(mine[i] == mine[j] for i in earlier) and len(mine[j]) > 1
-        out["kept"] += source is not None and mine[source] == mine[j] and len(mine[j]) > 1
+        out["chartgen"] += any(same_bar(mine[i], mine[j]) for i in earlier) and len(mine[j]) > 1
+        out["kept"] += source is not None and same_bar(mine[source], mine[j]) and len(mine[j]) > 1
     return out
 
 
