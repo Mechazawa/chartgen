@@ -39,11 +39,8 @@ DOWNBEAT_MATCH_S = 0.07
 HOLDOUT_SHARE = 0.1
 VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
-# Larger weights push the share of repeated shapes far past the official
-# charts' (about 38%) without improving agreement.
-MIX_ROUNDS, MIX_DAMPING = 16, 0.6
-DECODE_WEIGHTS = [(transition, relation) for transition in (0.0, 0.05, 0.1, 0.2)
-                  for relation in (0.0, 0.1, 0.2, 0.3)]
+QUOTA_POWERS = (1.0, 1.5, 2.0, 2.5, 3.0)
+ENTROPY_Z = 1.0
 FACTOR_WEIGHTS = [(size, row, columns) for size in (1.0, 2.0, 3.0, 4.0) for row in (1.0, 1.5, 2.0)
                   for columns in (0.5, 1.0)]
 SWEEP = {"width": (64, 128, 256), "layers": (2, 4, 6), "dropout": (0.1, 0.2, 0.3),
@@ -114,7 +111,7 @@ def song_arrays(record: dict, delay_s: float) -> dict:
     nearest = np.where(np.abs(grid.beat_times[k] - bars) < np.abs(grid.beat_times[k - 1] - bars), k, k - 1)
     votes = np.bincount(nearest[np.abs(grid.beat_times[nearest] - bars) <= DOWNBEAT_MATCH_S] % 4, minlength=4)
     return {"downbeat": grid.pickup_beats + int(votes.argmax()) if votes.any() else None,
-            "x": x.astype(np.float16), "shapes": shapes, "keep": keep,
+            "x": x.astype(np.float16), "seconds": times, "sustained": sustain_s > 0, "shapes": shapes, "keep": keep,
             "tier_shapes": tier_shapes, "offset": offset,
             "grid_ticks": (np.round(beats * ghl.GRID) * tempo.RESOLUTION // ghl.GRID).astype(np.int64),
             "sustain_ticks": np.round(sustain_beats * tempo.RESOLUTION).astype(np.int64)}
@@ -319,15 +316,6 @@ def reduce_loss(device):
     return loss_of
 
 
-def transitions(songs) -> np.ndarray:
-    """[64, 64] log P(next shape | shape) over the songs' Expert charts,
-    add-one smoothed."""
-    counts = np.ones((1 << ghl.BUTTONS, 1 << ghl.BUTTONS))
-    for song in songs:
-        np.add.at(counts, (song["shapes"][:-1], song["shapes"][1:]), 1)
-    return np.log(counts / counts.sum(1, keepdims=True))
-
-
 def shape_given_factors(songs) -> np.ndarray:
     """[64] log P(shape | its size, row and columns) over the songs' Expert
     charts, add-one smoothed."""
@@ -372,60 +360,93 @@ def switch_rate(shapes: np.ndarray) -> float:
     return float(np.mean(rows[1:] != rows[:-1])) if len(rows) > 1 else 0.0
 
 
-def calibrate_switches(shape_net, songs, device, allowed, moves, weights) -> tuple[float, ...]:
-    """weights with a switch weight that makes the decoded validation songs
-    change row between fretted notes as often as the official charts. The
-    model alone flickers between rows (30% of notes against 24%), since the
-    row does not follow the audio and each note picks its own."""
+def calibrate_shapes(shape_net, songs, device, allowed) -> float:
+    """Set shape_net's temperature and shape_bias to the values with the
+    lowest negative log likelihood of the validation songs' official
+    Expert shapes among the allowed ones. Returns the temperature."""
+    logits = torch.from_numpy(np.concatenate([ghl.windowed(shape_net, s["x"].astype(np.float32), device)
+                                              [:, :1 << ghl.BUTTONS] for s in songs]))
+    truth = torch.from_numpy(np.concatenate([s["shapes"] for s in songs]))
+    mask = torch.full((1 << ghl.BUTTONS,), -1e9)
+    mask[allowed] = 0
+    logits, truth = logits[mask[truth] == 0], truth[mask[truth] == 0]
+    log_temperature = torch.zeros((), requires_grad=True)
+    bias = torch.zeros(1 << ghl.BUTTONS, requires_grad=True)
+    opt = torch.optim.LBFGS([log_temperature, bias], lr=0.5, max_iter=200, line_search_fn="strong_wolfe")
+
+    def nll():
+        return nn.functional.cross_entropy(logits / log_temperature.exp() + bias + mask, truth)
+
+    def closure():
+        opt.zero_grad()
+        loss = nll()
+        loss.backward()
+        return loss
+
+    before = nll().item()
+    opt.step(closure)
+    temperature = log_temperature.exp().item()
+    print(f"  shape calibration: validation NLL {before:.3f} -> {nll().item():.3f}, "
+          f"temperature {temperature:.2f}", flush=True)
+    shape_net.temperature.fill_(temperature)
+    shape_net.shape_bias.copy_(bias.detach())
+    return temperature
+
+
+def style_notes(seconds, shapes, sustained) -> list[tuple[float, frozenset, bool]]:
+    return [(t, frozenset(b for b in range(ghl.BUTTONS) if s >> b & 1), sus)
+            for t, s, sus in zip(seconds, shapes, sustained, strict=True)]
+
+
+def pick_quota_power(shape_net, songs, population, device, allowed) -> float:
+    """The lowest QUOTA_POWERS entry whose Expert decode of the validation
+    songs has a mean style entropy z (tools/eval_ghl's panel, against the
+    population songs' official charts) of at most ENTROPY_Z, else the
+    highest. A higher power concentrates each song on the shapes the model
+    expects most: power 1 spreads a song over too many shapes (entropy z
+    about +1.6), and each step up moves the shape histogram further from
+    the official one."""
+    # tools.eval_ghl imports this module, so it cannot be imported at the top.
+    from tools.eval_ghl import panel
+
+    entropy = [panel(style_notes(s["seconds"], s["shapes"], s["sustained"]))["entropy"] for s in population]
+    official = np.concatenate([s["shapes"] for s in songs])
     logits = [ghl.windowed(shape_net, s["x"].astype(np.float32), device) for s in songs]
-    official = np.mean([switch_rate(s["shapes"]) for s in songs])
-    low, high = -2.0, 4.0
-    for _ in range(12):
-        middle = (low + high) / 2
-        rate = np.mean([switch_rate(ghl.viterbi(lg, moves, allowed, *weights[:2], middle)) for lg in logits])
-        low, high = (middle, high) if rate > official else (low, middle)
-    print(f"  switch weight {low:.3f}: switch rate {rate:.1%} (official {official:.1%})", flush=True)
-    return (*weights[:2], low)
+    for power in QUOTA_POWERS:
+        preds = [ghl.figure_shapes(lg, allowed, power) for lg in logits]
+        decoded = np.concatenate(preds)
+        z = np.mean([(panel(style_notes(s["seconds"], pred, s["sustained"]))["entropy"] - np.mean(entropy))
+                     / np.std(entropy) for pred, s in zip(preds, songs, strict=True)])
+        tv = np.abs(np.bincount(decoded, minlength=1 << ghl.BUTTONS)
+                    - np.bincount(official, minlength=1 << ghl.BUTTONS)).sum() / 2 / len(official)
+        print(f"  quota power {power:g}: entropy z {z:+.2f}, histogram TV {tv:.3f}", flush=True)
+        if z <= ENTROPY_Z:
+            break
+    print(f"  quota power {power:g}", flush=True)
+    return power
 
 
-def calibrate_mix(shape_net, songs, device, allowed, moves, weights) -> list[float]:
-    """Set shape_net's mix_bias so the decoded validation songs use each
-    chord size and row combination (ghl.MIX_CELL) as often as the official
-    charts. Agreement alone favours the most common one: the charts came
-    out 75% single notes against the official 53%. Size and row are
-    fitted as one table, since a shape on both rows needs two buttons and
-    separate size and row biases pulled against each other."""
-    cells = lambda shapes: np.bincount(ghl.MIX_CELL[shapes], minlength=ghl.MIX_CELLS) / len(shapes)
-    official = cells(np.concatenate([s["shapes"] for s in songs]))
-    logits = [s["x"].astype(np.float32) for s in songs]
-    for _ in range(MIX_ROUNDS):
-        decoded = cells(np.concatenate([ghl.viterbi(ghl.windowed(shape_net, x, device), moves, allowed, *weights)
-                                        for x in logits]))
-        step = MIX_DAMPING * np.log((official + 1e-3) / (decoded + 1e-3))
-        shape_net.mix_bias += torch.from_numpy(step).float().to(device)
-    print(f"  mix shares {np.round(decoded, 3)} (official {np.round(official, 3)})", flush=True)
-    return shape_net.mix_bias.tolist()
-
-
-def pick_decoding(shape_net, songs, device, allowed, moves) -> tuple[float, float]:
-    """The (transition, relation) weights with the best mean of size, row
-    and move agreement on the validation songs, less how far the share of
-    repeated shapes strays from the official charts'. Agreement alone
-    rewards a chart that never moves."""
-    logits = [ghl.windowed(shape_net, s["x"].astype(np.float32), device) for s in songs]
-    total = sum(len(s["shapes"]) for s in songs)
-    official = repeat_rate([s["shapes"] for s in songs])
-    best = (-np.inf, DECODE_WEIGHTS[0])
-    for weights in DECODE_WEIGHTS:
-        preds = [ghl.viterbi(lg, moves, allowed, *weights) for lg in logits]
-        hits = sum(structure_score(pred, s["shapes"]) for pred, s in zip(preds, songs, strict=True))
-        agreement = (hits[1] / total + hits[2] / total + hits[3] / max(hits[4], 1)) / 3
-        repeats = repeat_rate(preds)
-        score = agreement - abs(repeats - official)
-        print(f"  decode weights {weights}: agreement {agreement:.1%}, repeats {repeats:.0%} "
-              f"(official {official:.0%}), score {score:.3f}", flush=True)
-        best = max(best, (score, weights))
-    return best[1]
+def calibrate_switches(reduce_net, songs, expert, device, allowed, shares) -> dict[str, float]:
+    """Per lower tier: the switch weight that makes the tier, reduced from
+    the decoded Expert shapes of the validation songs (expert, as at run
+    time), change row between fretted notes as often as the official tier.
+    With each position picking its own shape, Hard switches row on 29% of
+    fretted notes against the official 24%. Easy keeps 0."""
+    outputs = [ghl.windowed(reduce_net, reduce_x(s, shapes), device) for s, shapes in zip(songs, expert, strict=True)]
+    kept = [ghl.nested_keep(out[..., 0], s["grid_ticks"], shares, tempo.RESOLUTION)
+            for out, s in zip(outputs, songs, strict=True)]
+    weights = {"Easy": 0.0}
+    for k, tier in enumerate(ghl.TIERS[:2]):
+        official = np.mean([switch_rate(s["tier_shapes"][s["keep"][:, k] > 0, k]) for s in songs])
+        low, high = -2.0, 4.0
+        for _ in range(12):
+            middle = (low + high) / 2
+            rate = np.mean([switch_rate(ghl.viterbi(out[keep[tier], k, 1:], allowed[tier], middle))
+                            for out, keep in zip(outputs, kept, strict=True)])
+            low, high = (middle, high) if rate > official else (low, middle)
+        print(f"  {tier} switch weight {low:.3f}: switch rate {rate:.1%} (official {official:.1%})", flush=True)
+        weights[tier] = low
+    return weights
 
 
 def keep_share(songs) -> dict[str, float]:
@@ -453,7 +474,7 @@ def structure(shapes: np.ndarray):
     return np.minimum(np.bitwise_count(shapes), 3), row, np.sign(np.diff(column, append=np.nan))
 
 
-def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weights, shares, board) -> None:
+def evaluate(shape_net, reduce_net, songs, device, allowed, power, switch_weights, shares, board) -> None:
     shape_net.eval()
     reduce_net.eval()
     hits = np.zeros(5)  # exact, size, row, move, fretted pairs
@@ -462,14 +483,16 @@ def evaluate(shape_net, reduce_net, songs, device, allowed, moves, weights, shar
     preds = []
     for song in songs:
         x = song["x"].astype(np.float32)
-        pred = ghl.viterbi(ghl.windowed(shape_net, x, device), moves, allowed["Expert"], *weights)
+        pred = ghl.figure_shapes(ghl.windowed(shape_net, x, device), allowed["Expert"], power)
         preds.append(pred)
         hits += structure_score(pred, song["shapes"])
         total += len(pred)
         out = ghl.windowed(reduce_net, reduce_x(song, song["shapes"]), device)
         nested = ghl.nested_keep(out[..., 0], song["grid_ticks"], shares, tempo.RESOLUTION)
         kept = np.stack([nested[tier] for tier in ghl.TIERS], 1)
-        tier_pred = out[..., 1:].argmax(-1)
+        tier_pred = np.zeros(kept.shape, dtype=np.int64)
+        for k, tier in enumerate(ghl.TIERS):
+            tier_pred[kept[:, k], k] = ghl.viterbi(out[kept[:, k], k, 1:], allowed[tier], switch_weights[tier])
         truth = song["keep"] > 0
         tier_stats[:, 0] += (kept & truth).sum(0)
         tier_stats[:, 1] += (kept & ~truth).sum(0)
@@ -543,7 +566,8 @@ def main(argv=None):
             net.load_state_dict({k: v.float() for k, v in saved[name].items()}, strict=False)
         timing_net, shape_net, reduce_net = nets
         timing_config, shape_config, reduce_config = (saved["config"][k] for k in ("timing", "shape", "reduce"))
-        shape_net.mix_bias.zero_()
+        shape_net.temperature.fill_(1.0)
+        shape_net.shape_bias.zero_()
     else:
         timing_net, timing_config = fit(ghl.TimingNet, configs, train_timing, [t for t, _ in val_timing],
                                         args.steps, args.batch, device, timing_loss(device), runs / "timing")
@@ -558,19 +582,21 @@ def main(argv=None):
     shape_net.given_factors.copy_(torch.from_numpy(shape_given_factors(train_songs)))
     board.add_text("factor_weights", str(pick_factor_weights(shape_net, val_songs)))
     allowed = allowed_shapes(train_songs)
-    moves = transitions(train_songs)
-    weights = pick_decoding(shape_net, val_songs, device, allowed["Expert"], moves)
-    board.add_text("mix_bias", str(calibrate_mix(shape_net, val_songs, device, allowed["Expert"], moves, weights)))
-    weights = calibrate_switches(shape_net, val_songs, device, allowed["Expert"], moves, weights)
-    board.add_text("decode_weights", str(weights))
+    board.add_text("temperature", str(calibrate_shapes(shape_net, val_songs, device, allowed["Expert"])))
+    power = pick_quota_power(shape_net, val_songs, train_songs, device, allowed["Expert"])
+    expert = [ghl.figure_shapes(ghl.windowed(shape_net, s["x"].astype(np.float32), device), allowed["Expert"], power)
+              for s in val_songs]
+    switch_weights = calibrate_switches(reduce_net, val_songs, expert, device, allowed, keep_share(train_songs))
+    board.add_text("decode", f"quota power {power}, switch weights {switch_weights}")
     threshold = timing_threshold(timing_net, *zip(*val_timing, strict=True), device)
     evaluate_timing(timing_net, *zip(*test_timing, strict=True), device, threshold, board)
-    evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weights, keep_share(train_songs), board)
+    evaluate(shape_net, reduce_net, test_songs, device, allowed, power, switch_weights, keep_share(train_songs),
+             board)
     torch.save({"timing": {k: v.half() for k, v in timing_net.state_dict().items()},
                 "timing_threshold": threshold,
                 "shape": {k: v.half() for k, v in shape_net.state_dict().items()},
                 "reduce": {k: v.half() for k, v in reduce_net.state_dict().items()},
-                "allowed": allowed, "transitions": torch.from_numpy(moves), "decode_weights": weights,
+                "allowed": allowed, "quota_power": power, "switch_weights": switch_weights,
                 "keep_share": keep_share(train_songs),
                 "config": {"timing": timing_config, "shape": shape_config, "reduce": reduce_config},
                 "holdout": sorted(holdout)}, args.out)

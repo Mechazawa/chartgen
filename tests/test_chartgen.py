@@ -189,8 +189,8 @@ def test_ghl_tiers_follow_the_official_ladder_and_sustain_rules():
         path = Path(folder) / "ghl_model.pt"
         torch.save({"timing": ghl.TimingNet().state_dict(), "timing_threshold": -1e9,
                     "shape": ghl.ShapeNet().state_dict(), "reduce": ghl.ReduceNet().state_dict(),
-                    "allowed": allowed, "transitions": torch.zeros(64, 64),
-                    "decode_weights": (0.5, 1.0),
+                    "allowed": allowed, "quota_power": 1.25,
+                    "switch_weights": {"Hard": 1.0, "Medium": 0.5, "Easy": 0.0},
                     "keep_share": {"Hard": 0.75, "Medium": 0.5, "Easy": 0.35},
                     "config": {"timing": {}, "shape": {}, "reduce": {}}}, path)
         saved_path, ghl.MODEL_PATH = ghl.MODEL_PATH, path
@@ -224,6 +224,36 @@ def test_ghl_tiers_follow_the_official_ladder_and_sustain_rules():
     for tick, _, _ in out["MediumGHLGuitar"]:
         medium_sizes[tick] = medium_sizes.get(tick, 0) + 1
     assert max(medium_sizes.values(), default=0) <= 2
+
+
+def test_ghl_expert_figures_take_one_shape_each_within_the_songs_quota():
+    """Notes the relation head joins to the previous one (P(SAME) > 0.5)
+    share its shape, and no shape takes much more than its expected share
+    even where it is every note's best."""
+    from chartgen import ghl
+
+    a, b = 1, 8
+    shapes = np.full((20, 64), -30.0)
+    shapes[:, a], shapes[:, b] = np.log(0.6), np.log(0.4)
+    relations = np.zeros((20, ghl.RELATIONS))
+    out = ghl.figure_shapes(np.hstack([shapes, relations]), [a, b], 1.0)
+    # expected counts 12 and 8: shape a may take at most ceil(1.1 x 12) + 2 notes
+    assert set(out) == {a, b} and 7 <= (out == a).sum() <= 16, out
+
+    rng = np.random.default_rng(0)
+    relations[:, ghl.SAME] = np.where(np.arange(20) % 4, 5.0, -5.0)
+    out = ghl.figure_shapes(np.hstack([rng.normal(size=(20, 64)), relations]), list(range(64)), 1.25)
+    assert all(len(set(out[i:i + 4])) == 1 for i in range(0, 20, 4)), out
+
+
+def test_ghl_tier_switch_weight_keeps_the_row():
+    from chartgen import ghl
+
+    logits = np.full((6, 64), -9.0)
+    logits[[0, 2, 4], 1] = 0.0  # W1 best
+    logits[[1, 3, 5], 8] = 0.0  # B1 best
+    assert ghl.viterbi(logits, [1, 8], 0.0).tolist() == [1, 8, 1, 8, 1, 8]
+    assert len(set(ghl.viterbi(logits, [1, 8], 20.0))) == 1
 
 
 def test_ghl_tier_sustains_run_to_the_tiers_next_note_when_it_is_far_enough():

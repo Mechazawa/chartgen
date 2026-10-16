@@ -15,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.optimize import Bounds, LinearConstraint, milp
+from scipy.sparse import coo_matrix
 from torch import nn
 
 from .tempo import ONSET_LAG_S
@@ -49,6 +51,10 @@ SUSTAIN_GAP_S = 0.3
 TIER_SUSTAIN_BEATS = {"Hard": 1.0, "Medium": 2.0, "Easy": 2.25}
 TIER_MIN_GAP_BEATS = {"Hard": 1 / 12, "Medium": 0.2, "Easy": 1 / 3}
 TIER_FEATURES = 25
+FIGURE_SAME = 0.5  # P(SAME) at or below which a note starts a new figure
+DIFFERENT_SAME = 0.35  # P(SAME) at or below which a new figure must change shape
+QUOTA_BOUNDS = (0.7, 1.1)  # share of its quota each Expert shape may use
+MILP_SECONDS = 20
 
 
 def shape_class(lanes) -> int:
@@ -95,10 +101,6 @@ def _factors(shape: int) -> tuple[int, int, int]:
 
 FACTOR_OF = np.array([_factors(shape) for shape in range(1 << BUTTONS)])
 FACTOR_SIZES = (4, 3, 7)
-# Mix cell of each shape: 0 for an open note, else one per chord size (1, 2,
-# 3+) and row (white, black, both).
-MIX_CELL = np.where(FACTOR_OF[:, 0] == 0, 0, 1 + (FACTOR_OF[:, 0] - 1) * 3 + FACTOR_OF[:, 1])
-MIX_CELLS = 10
 # 1 where two shapes are both fretted and on different rows (white, black, both).
 ROW_SWITCH = ((FACTOR_OF[:, 1][:, None] != FACTOR_OF[:, 1][None, :])
               & (FACTOR_OF[:, 1][:, None] >= 0) & (FACTOR_OF[:, 1][None, :] >= 0)).astype(np.float32)
@@ -253,8 +255,10 @@ class ShapeNet(nn.Module):
     and for the RELATIONS to the previous position's shape. forward()
     composes the factors' log probabilities, scaled by factor_weights, into
     scores over the 64 button bitmasks, adding the official charts' log
-    P(shape | its factors) and the mix_bias of its MIX_CELL, then the
-    relation logits."""
+    P(shape | its factors). The scores are then divided by temperature and
+    shifted by shape_bias, both fitted by likelihood on the validation
+    songs, since the network alone is far too sure of its best shape. The
+    relation logits follow the 64 scores."""
 
     def __init__(self, width: int = 128, layers: int = 4, dropout: float = 0.2):
         super().__init__()
@@ -262,8 +266,8 @@ class ShapeNet(nn.Module):
         self.head = nn.Linear(width, sum(FACTOR_SIZES) + RELATIONS)
         self.register_buffer("given_factors", torch.zeros(1 << BUTTONS))
         self.register_buffer("factor_weights", torch.ones(len(FACTOR_SIZES)))
-        self.register_buffer("mix_bias", torch.zeros(MIX_CELLS))
-        self.register_buffer("mix_cell", torch.from_numpy(MIX_CELL), persistent=False)
+        self.register_buffer("temperature", torch.ones(()))
+        self.register_buffer("shape_bias", torch.zeros(1 << BUTTONS))
         self.register_buffer("factor_of", torch.from_numpy(FACTOR_OF), persistent=False)
 
     def heads(self, x, pad):
@@ -271,12 +275,12 @@ class ShapeNet(nn.Module):
 
     def forward(self, x, pad):
         *factors, relations = self.heads(x, pad)
-        score = (self.given_factors + self.mix_bias[self.mix_cell]).expand(*relations.shape[:-1], -1)
+        score = self.given_factors.expand(*relations.shape[:-1], -1)
         for k, logits in enumerate(factors):
             index = self.factor_of[:, k]
             score = score + self.factor_weights[k] * torch.where(
                 index >= 0, logits.log_softmax(-1)[..., index.clamp(min=0)], 0)
-        return torch.cat([score, relations], -1)
+        return torch.cat([score / self.temperature + self.shape_bias, relations], -1)
 
 
 class ReduceNet(nn.Module):
@@ -412,13 +416,6 @@ def _models(device: str):
     return _MODELS[device]
 
 
-def _masked(logits: np.ndarray, allowed) -> np.ndarray:
-    """Argmax over the shapes the official charts use on this tier."""
-    mask = np.full(logits.shape[-1], -np.inf, dtype=np.float32)
-    mask[list(allowed)] = 0
-    return (logits + mask).argmax(-1)
-
-
 def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
     """{"ExpertGHLGuitar": notes, "HardGHLGuitar": ...}, or {} when no
     trained model ships. envelope is onset_envelope() of the mix."""
@@ -440,8 +437,7 @@ def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
     expert_sustain = sustains(ticks, everywhere, sustained, 0, res)
     sustain_s = np.array([tempo.beat_to_time((t + s) / res) for t, s in zip(ticks, expert_sustain, strict=True)]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)
-    shapes = viterbi(windowed(shape_net, x, device), saved["transitions"].cpu().numpy(),
-                     allowed["Expert"], *saved["decode_weights"])
+    shapes = figure_shapes(windowed(shape_net, x, device), allowed["Expert"], saved["quota_power"])
     sustained &= shapes != 0
     expert_sustain[~sustained] = 0
     downbeat = None if tempo.downbeat_phase is None else tempo.pickup_beats + tempo.downbeat_phase
@@ -455,7 +451,8 @@ def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
     out = {"ExpertGHLGuitar": notes(everywhere, shapes, expert_sustain)}
     kept = nested_keep(reduced[..., 0], ticks, saved["keep_share"], res)
     for k, tier in enumerate(TIERS):
-        tier_shapes = _masked(reduced[:, k, 1:], allowed[tier])
+        tier_shapes = np.zeros(len(ticks), dtype=np.int64)
+        tier_shapes[kept[tier]] = viterbi(reduced[kept[tier], k, 1:], allowed[tier], saved["switch_weights"][tier])
         tier_sustain = sustains(ticks, kept[tier], sustained & (tier_shapes != 0), TIER_SUSTAIN_BEATS[tier], res)
         out[f"{tier}GHLGuitar"] = notes(kept[tier], tier_shapes, tier_sustain)
     return out
@@ -465,23 +462,68 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
     return logits - np.logaddexp.reduce(logits, axis=-1, keepdims=True)
 
 
-def viterbi(logits: np.ndarray, transitions: np.ndarray, allowed,
-            transition_weight: float, relation_weight: float, switch_weight: float = 0.0) -> np.ndarray:
-    """The allowed shape sequence with the best total of: each position's
-    shape log probability, transition_weight x the official charts'
-    shape-to-shape log probability, relation_weight x the model's log
-    probability of how each shape relates to the one before it, less
-    switch_weight for every change of row between fretted notes."""
-    shapes = _log_softmax(logits[:, :1 << BUTTONS])
-    relations = _log_softmax(logits[:, 1 << BUTTONS:])
+def figure_shapes(logits: np.ndarray, allowed, power: float) -> np.ndarray:
+    """Expert shapes from ShapeNet's output. A figure (a run of one shape)
+    starts wherever the relation head gives P(SAME) <= FIGURE_SAME. Each
+    figure gets one shape, chosen by a MILP that maximises the total log
+    probability while every shape's note count stays within QUOTA_BOUNDS of
+    its quota, and two neighbouring figures differ where P(SAME) <=
+    DIFFERENT_SAME. The quota is the song's expected count of the shape
+    ** power, rescaled so each chord size keeps its expected note count:
+    the power concentrates a song on fewer shapes without changing how
+    many notes are single. Per-note picks put the same few shapes
+    everywhere. When the MILP finds no solution in MILP_SECONDS, each
+    figure takes its best shape."""
+    mask = np.full(1 << BUTTONS, -np.inf)
+    mask[list(allowed)] = 0
+    logp = _log_softmax(logits[:, :1 << BUTTONS] + mask)
+    same = np.exp(_log_softmax(logits[:, 1 << BUTTONS:]))[:, SAME]
+    starts = np.concatenate([[True], same[1:] <= FIGURE_SAME])
+    figure = np.cumsum(starts) - 1
+    expected = np.exp(logp).sum(0)
+    size = FACTOR_OF[:, 0]
+    sharp = expected ** power
+    quota = (sharp * np.bincount(size, weights=expected)[size]
+             / np.maximum(np.bincount(size, weights=sharp)[size], 1e-12))[list(allowed)]
+    gain = np.zeros((figure[-1] + 1, len(logp[0])))
+    np.add.at(gain, figure, logp)
+    gain = gain[:, list(allowed)]
+    n_figures, n_shapes = gain.shape
+    choices = np.arange(gain.size)
+    one_shape = coo_matrix((np.ones(gain.size), (choices // n_shapes, choices)), shape=(n_figures, gain.size))
+    notes = coo_matrix((np.bincount(figure)[choices // n_shapes].astype(float), (choices % n_shapes, choices)),
+                       shape=(n_shapes, gain.size))
+    # One row per shape and figure f whose next figure starts with P(SAME) <= DIFFERENT_SAME.
+    sure = np.flatnonzero(same[starts][1:] <= DIFFERENT_SAME)
+    pair = (sure[:, None] * n_shapes + np.arange(n_shapes)).ravel()
+    different = coo_matrix((np.ones(2 * len(pair)), (np.tile(np.arange(len(pair)), 2),
+                                                      np.concatenate([pair, pair + n_shapes]))),
+                           shape=(len(pair), gain.size))
+    low, high = QUOTA_BOUNDS
+    found = milp(-gain.ravel(), integrality=np.ones(gain.size), bounds=Bounds(0, 1),
+                 constraints=[LinearConstraint(one_shape, 1, 1),
+                              LinearConstraint(notes, np.maximum(np.floor(quota * low) - 1, 0),
+                                               np.ceil(quota * high) + 2),
+                              LinearConstraint(different, 0, 1)],
+                 options={"time_limit": MILP_SECONDS})
+    best = gain.argmax(1) if found.x is None else found.x.reshape(gain.shape).argmax(1)
+    return np.array(allowed)[best][figure]
+
+
+def viterbi(logits: np.ndarray, allowed, switch_weight: float) -> np.ndarray:
+    """The allowed shape sequence with the best total of each position's
+    shape log probability, less switch_weight for every change of row
+    between fretted notes."""
+    if not len(logits):
+        return np.zeros(0, dtype=np.int64)
+    shapes = _log_softmax(logits)
     banned = np.ones(shapes.shape[1], bool)
     banned[list(allowed)] = False
     shapes[:, banned] = -np.inf
     score = shapes[0].copy()
     back = np.zeros(shapes.shape, dtype=np.int64)
     for i in range(1, len(shapes)):
-        candidates = (score[:, None] + transition_weight * transitions
-                      + relation_weight * relations[i][RELATION_OF] - switch_weight * ROW_SWITCH)
+        candidates = score[:, None] - switch_weight * ROW_SWITCH
         back[i] = candidates.argmax(0)
         score = candidates.max(0) + shapes[i]
     path = np.zeros(len(shapes), dtype=np.int64)
