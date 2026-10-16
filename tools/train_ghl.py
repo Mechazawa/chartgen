@@ -366,6 +366,28 @@ def pick_factor_weights(shape_net, songs) -> tuple[float, ...]:
     return best[1]
 
 
+def switch_rate(shapes: np.ndarray) -> float:
+    rows = ghl.FACTOR_OF[shapes, 1]
+    rows = rows[rows >= 0]
+    return float(np.mean(rows[1:] != rows[:-1])) if len(rows) > 1 else 0.0
+
+
+def calibrate_switches(shape_net, songs, device, allowed, moves, weights) -> tuple[float, ...]:
+    """weights with a switch weight that makes the decoded validation songs
+    change row between fretted notes as often as the official charts. The
+    model alone flickers between rows (30% of notes against 24%), since the
+    row does not follow the audio and each note picks its own."""
+    logits = [ghl.windowed(shape_net, s["x"].astype(np.float32), device) for s in songs]
+    official = np.mean([switch_rate(s["shapes"]) for s in songs])
+    low, high = -2.0, 4.0
+    for _ in range(12):
+        middle = (low + high) / 2
+        rate = np.mean([switch_rate(ghl.viterbi(lg, moves, allowed, *weights[:2], middle)) for lg in logits])
+        low, high = (middle, high) if rate > official else (low, middle)
+    print(f"  switch weight {low:.3f}: switch rate {rate:.1%} (official {official:.1%})", flush=True)
+    return (*weights[:2], low)
+
+
 def calibrate_sizes(shape_net, songs, device, allowed, moves, weights) -> list[float]:
     """Set shape_net's size_bias so the decoded validation songs use open
     notes, singles, pairs and triples as often as the official charts.
@@ -476,6 +498,8 @@ def main(argv=None):
     ap.add_argument("--train-share", type=float, default=1.0,
                     help="train on this share of the training songs (for a learning curve)")
     ap.add_argument("--seed", type=int, default=3, help="picks the songs --train-share keeps")
+    ap.add_argument("--recalibrate", type=Path, metavar="MODEL",
+                    help="reuse the networks in MODEL and redo only the validation-tuned decoding")
     ap.add_argument("-o", "--out", type=Path, default=ghl.MODEL_PATH)
     ap.add_argument("--runs", type=Path, default=Path("data/ghl-runs"))
     args = ap.parse_args(argv)
@@ -508,12 +532,22 @@ def main(argv=None):
     runs = args.runs / time.strftime("%Y-%m-%d_%H-%M-%S")
     rng = random.Random(2)
     configs = [{k: rng.choice(v) for k, v in SWEEP.items()} for _ in range(args.sweep)] or [args.config or DEFAULT]
-    timing_net, timing_config = fit(ghl.TimingNet, configs, train_timing, [t for t, _ in val_timing],
-                                    args.steps, args.batch, device, timing_loss(device), runs / "timing")
-    shape_net, shape_config = fit(ghl.ShapeNet, configs, train_songs, val_songs, args.steps,
-                                  args.batch, device, shape_loss(device), runs / "shape")
-    reduce_net, reduce_config = fit(ghl.ReduceNet, configs, train_songs, val_songs, args.steps // 2,
-                                    args.batch, device, reduce_loss(device), runs / "reduce")
+    if args.recalibrate:
+        saved = torch.load(args.recalibrate, map_location=device)
+        nets = [net(**saved["config"][name]).to(device).eval()
+                for name, net in (("timing", ghl.TimingNet), ("shape", ghl.ShapeNet), ("reduce", ghl.ReduceNet))]
+        for net, name in zip(nets, ("timing", "shape", "reduce"), strict=True):
+            net.load_state_dict({k: v.float() for k, v in saved[name].items()}, strict=False)
+        timing_net, shape_net, reduce_net = nets
+        timing_config, shape_config, reduce_config = (saved["config"][k] for k in ("timing", "shape", "reduce"))
+        shape_net.size_bias.zero_()
+    else:
+        timing_net, timing_config = fit(ghl.TimingNet, configs, train_timing, [t for t, _ in val_timing],
+                                        args.steps, args.batch, device, timing_loss(device), runs / "timing")
+        shape_net, shape_config = fit(ghl.ShapeNet, configs, train_songs, val_songs, args.steps,
+                                      args.batch, device, shape_loss(device), runs / "shape")
+        reduce_net, reduce_config = fit(ghl.ReduceNet, configs, train_songs, val_songs, args.steps // 2,
+                                        args.batch, device, reduce_loss(device), runs / "reduce")
     board = SummaryWriter(runs / "holdout")
     board.add_text("data", f"{len(train_songs)} train, {len(val_songs)} validation, "
                            f"{len(test_songs)} holdout songs; shape {shape_config}, "
@@ -523,6 +557,7 @@ def main(argv=None):
     allowed = allowed_shapes(train_songs)
     moves = transitions(train_songs)
     weights = pick_decoding(shape_net, val_songs, device, allowed["Expert"], moves)
+    weights = calibrate_switches(shape_net, val_songs, device, allowed["Expert"], moves, weights)
     board.add_text("decode_weights", str(weights))
     board.add_text("size_bias", str(calibrate_sizes(shape_net, val_songs, device, allowed["Expert"], moves, weights)))
     threshold = timing_threshold(timing_net, *zip(*val_timing, strict=True), device)

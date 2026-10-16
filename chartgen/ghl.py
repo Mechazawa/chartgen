@@ -95,6 +95,9 @@ def _factors(shape: int) -> tuple[int, int, int]:
 
 FACTOR_OF = np.array([_factors(shape) for shape in range(1 << BUTTONS)])
 FACTOR_SIZES = (4, 3, 7)
+# 1 where two shapes are both fretted and on different rows (white, black, both).
+ROW_SWITCH = ((FACTOR_OF[:, 1][:, None] != FACTOR_OF[:, 1][None, :])
+              & (FACTOR_OF[:, 1][:, None] >= 0) & (FACTOR_OF[:, 1][None, :] >= 0)).astype(np.float32)
 
 
 def _pitch_rows(events, times: np.ndarray, sounding: bool) -> np.ndarray:
@@ -457,11 +460,12 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
 
 
 def viterbi(logits: np.ndarray, transitions: np.ndarray, allowed,
-            transition_weight: float, relation_weight: float) -> np.ndarray:
+            transition_weight: float, relation_weight: float, switch_weight: float = 0.0) -> np.ndarray:
     """The allowed shape sequence with the best total of: each position's
     shape log probability, transition_weight x the official charts'
-    shape-to-shape log probability, and relation_weight x the model's log
-    probability of how each shape relates to the one before it."""
+    shape-to-shape log probability, relation_weight x the model's log
+    probability of how each shape relates to the one before it, less
+    switch_weight for every change of row between fretted notes."""
     shapes = _log_softmax(logits[:, :1 << BUTTONS])
     relations = _log_softmax(logits[:, 1 << BUTTONS:])
     banned = np.ones(shapes.shape[1], bool)
@@ -471,7 +475,7 @@ def viterbi(logits: np.ndarray, transitions: np.ndarray, allowed,
     back = np.zeros(shapes.shape, dtype=np.int64)
     for i in range(1, len(shapes)):
         candidates = (score[:, None] + transition_weight * transitions
-                      + relation_weight * relations[i][RELATION_OF])
+                      + relation_weight * relations[i][RELATION_OF] - switch_weight * ROW_SWITCH)
         back[i] = candidates.argmax(0)
         score = candidates.max(0) + shapes[i]
     path = np.zeros(len(shapes), dtype=np.int64)
