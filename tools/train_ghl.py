@@ -141,7 +141,7 @@ def crops(songs, rng, batch):
     out = []
     for song in picks:
         begin = rng.randrange(max(1, len(song["x"]) - ghl.WINDOW + 1))
-        out.append({k: v[begin:begin + ghl.WINDOW] for k, v in song.items() if k != "offset"})
+        out.append({k: v[begin:begin + ghl.WINDOW] if isinstance(v, np.ndarray) else v for k, v in song.items()})
     return out
 
 
@@ -255,8 +255,9 @@ def near(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Per time in a: whether b has a time within MATCH_S."""
     if not len(b):
         return np.zeros(len(a), bool)
-    k = np.clip(np.searchsorted(b, a), 1, max(1, len(b) - 1))
-    return np.minimum(np.abs(b[k] - a), np.abs(b[k - 1] - a)) <= MATCH_S
+    k = np.searchsorted(b, a)
+    after, before = b[np.minimum(k, len(b) - 1)], b[np.maximum(k - 1, 0)]
+    return np.minimum(np.abs(after - a), np.abs(before - a)) <= MATCH_S
 
 
 def evaluate_timing(timing_net, songs, extras, device, threshold, board) -> None:
