@@ -41,7 +41,7 @@ VALIDATION_SHARE = 0.05  # of the training songs, for early stopping
 VALIDATE_EVERY = 250
 # Larger weights push the share of repeated shapes far past the official
 # charts' (about 38%) without improving agreement.
-SIZE_ROUNDS = 6
+MIX_ROUNDS = 8
 DECODE_WEIGHTS = [(transition, relation) for transition in (0.0, 0.05, 0.1, 0.2)
                   for relation in (0.0, 0.1, 0.2, 0.3)]
 FACTOR_WEIGHTS = [(size, row, columns) for size in (1.0, 2.0, 3.0, 4.0) for row in (1.0, 1.5, 2.0)
@@ -388,20 +388,25 @@ def calibrate_switches(shape_net, songs, device, allowed, moves, weights) -> tup
     return (*weights[:2], low)
 
 
-def calibrate_sizes(shape_net, songs, device, allowed, moves, weights) -> list[float]:
-    """Set shape_net's size_bias so the decoded validation songs use open
-    notes, singles, pairs and triples as often as the official charts.
-    Agreement alone favours the most common size, the single note, and left
-    the charts with 75% singles against the official 53%."""
-    sizes = lambda shapes: np.bincount(np.minimum(np.bitwise_count(shapes), 3), minlength=4) / len(shapes)
-    official = sizes(np.concatenate([s["shapes"] for s in songs]))
-    for _ in range(SIZE_ROUNDS):
-        preds = np.concatenate([ghl.viterbi(ghl.windowed(shape_net, s["x"].astype(np.float32), device), moves,
-                                            allowed, *weights) for s in songs])
-        shape_net.size_bias += torch.from_numpy(np.log((official + 1e-3) / (sizes(preds) + 1e-3))).float().to(device)
-    print(f"  size shares {np.round(sizes(preds), 3)} (official {np.round(official, 3)}), "
-          f"bias {shape_net.size_bias.cpu().numpy().round(2)}", flush=True)
-    return shape_net.size_bias.tolist()
+def calibrate_mix(shape_net, songs, device, allowed, moves, weights) -> dict:
+    """Set shape_net's size_bias and row_bias so the decoded validation
+    songs use each chord size (open to triple) and each row (white, black,
+    both) as often as the official charts. Agreement alone favours the most
+    common class: the charts came out 75% single notes against the
+    official 53%, and then put 73% of singles on the black row against 60%."""
+    def shares(shapes):
+        rows = ghl.FACTOR_OF[shapes, 1]
+        return (np.bincount(ghl.FACTOR_OF[shapes, 0], minlength=4) / len(shapes),
+                np.bincount(rows[rows >= 0], minlength=3) / max((rows >= 0).sum(), 1))
+    official = shares(np.concatenate([s["shapes"] for s in songs]))
+    for _ in range(MIX_ROUNDS):
+        decoded = shares(np.concatenate([ghl.viterbi(ghl.windowed(shape_net, s["x"].astype(np.float32), device),
+                                                     moves, allowed, *weights) for s in songs]))
+        for bias, want, got in zip((shape_net.size_bias, shape_net.row_bias), official, decoded, strict=True):
+            bias += torch.from_numpy(np.log((want + 1e-3) / (got + 1e-3))).float().to(device)
+    for name, want, got in zip(("size", "row"), official, decoded, strict=True):
+        print(f"  {name} shares {np.round(got, 3)} (official {np.round(want, 3)})", flush=True)
+    return {"size": shape_net.size_bias.tolist(), "row": shape_net.row_bias.tolist()}
 
 
 def pick_decoding(shape_net, songs, device, allowed, moves) -> tuple[float, float]:
@@ -541,6 +546,7 @@ def main(argv=None):
         timing_net, shape_net, reduce_net = nets
         timing_config, shape_config, reduce_config = (saved["config"][k] for k in ("timing", "shape", "reduce"))
         shape_net.size_bias.zero_()
+        shape_net.row_bias.zero_()
     else:
         timing_net, timing_config = fit(ghl.TimingNet, configs, train_timing, [t for t, _ in val_timing],
                                         args.steps, args.batch, device, timing_loss(device), runs / "timing")
@@ -557,9 +563,9 @@ def main(argv=None):
     allowed = allowed_shapes(train_songs)
     moves = transitions(train_songs)
     weights = pick_decoding(shape_net, val_songs, device, allowed["Expert"], moves)
+    board.add_text("mix_bias", str(calibrate_mix(shape_net, val_songs, device, allowed["Expert"], moves, weights)))
     weights = calibrate_switches(shape_net, val_songs, device, allowed["Expert"], moves, weights)
     board.add_text("decode_weights", str(weights))
-    board.add_text("size_bias", str(calibrate_sizes(shape_net, val_songs, device, allowed["Expert"], moves, weights)))
     threshold = timing_threshold(timing_net, *zip(*val_timing, strict=True), device)
     evaluate_timing(timing_net, *zip(*test_timing, strict=True), device, threshold, board)
     evaluate(shape_net, reduce_net, test_songs, device, allowed, moves, weights, keep_share(train_songs), board)
