@@ -95,6 +95,10 @@ def _factors(shape: int) -> tuple[int, int, int]:
 
 FACTOR_OF = np.array([_factors(shape) for shape in range(1 << BUTTONS)])
 FACTOR_SIZES = (4, 3, 7)
+# Mix cell of each shape: 0 for an open note, else one per chord size (1, 2,
+# 3+) and row (white, black, both).
+MIX_CELL = np.where(FACTOR_OF[:, 0] == 0, 0, 1 + (FACTOR_OF[:, 0] - 1) * 3 + FACTOR_OF[:, 1])
+MIX_CELLS = 10
 # 1 where two shapes are both fretted and on different rows (white, black, both).
 ROW_SWITCH = ((FACTOR_OF[:, 1][:, None] != FACTOR_OF[:, 1][None, :])
               & (FACTOR_OF[:, 1][:, None] >= 0) & (FACTOR_OF[:, 1][None, :] >= 0)).astype(np.float32)
@@ -249,8 +253,8 @@ class ShapeNet(nn.Module):
     and for the RELATIONS to the previous position's shape. forward()
     composes the factors' log probabilities, scaled by factor_weights, into
     scores over the 64 button bitmasks, adding the official charts' log
-    P(shape | its factors), size_bias and row_bias, then the relation
-    logits."""
+    P(shape | its factors) and the mix_bias of its MIX_CELL, then the
+    relation logits."""
 
     def __init__(self, width: int = 128, layers: int = 4, dropout: float = 0.2):
         super().__init__()
@@ -258,8 +262,8 @@ class ShapeNet(nn.Module):
         self.head = nn.Linear(width, sum(FACTOR_SIZES) + RELATIONS)
         self.register_buffer("given_factors", torch.zeros(1 << BUTTONS))
         self.register_buffer("factor_weights", torch.ones(len(FACTOR_SIZES)))
-        self.register_buffer("size_bias", torch.zeros(FACTOR_SIZES[0]))
-        self.register_buffer("row_bias", torch.zeros(FACTOR_SIZES[1]))
+        self.register_buffer("mix_bias", torch.zeros(MIX_CELLS))
+        self.register_buffer("mix_cell", torch.from_numpy(MIX_CELL), persistent=False)
         self.register_buffer("factor_of", torch.from_numpy(FACTOR_OF), persistent=False)
 
     def heads(self, x, pad):
@@ -267,9 +271,7 @@ class ShapeNet(nn.Module):
 
     def forward(self, x, pad):
         *factors, relations = self.heads(x, pad)
-        row = self.factor_of[:, 1]
-        bias = self.size_bias[self.factor_of[:, 0]] + torch.where(row >= 0, self.row_bias[row.clamp(min=0)], 0)
-        score = (self.given_factors + bias).expand(*relations.shape[:-1], -1)
+        score = (self.given_factors + self.mix_bias[self.mix_cell]).expand(*relations.shape[:-1], -1)
         for k, logits in enumerate(factors):
             index = self.factor_of[:, k]
             score = score + self.factor_weights[k] * torch.where(
