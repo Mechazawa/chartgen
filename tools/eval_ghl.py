@@ -15,10 +15,12 @@ import argparse
 import itertools
 import json
 import pickle
+import random
 import re
 import sys
 import tempfile
 from collections import Counter, defaultdict
+from itertools import groupby, pairwise
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +36,7 @@ from tools.train_ghl import ini_delay_s, song_key
 
 MATCH_S = 0.05
 DIFFS = tuple(DIFF_BASE)
+ROW_DIFFS = ("Expert", "Hard")
 SHUFFLES = 20
 FLAG_Z = 2.0
 SHAPE_KEYS = ("exact", "size", "row", "direction")
@@ -98,6 +101,7 @@ def score(ours, theirs) -> dict:
             "exact": sum(a == b for a, b, *_ in pairs),
             "size": sum(len(a) == len(b) for a, b, *_ in pairs),
             "row": sum((min(a, default=-1) >= 3) == (min(b, default=-1) >= 3) for a, b, *_ in pairs),
+            "row_rest": sum(min(b, default=-1) < 3 for _, b, *_ in pairs),
             "direction": sum(a == b for a, b in moves), "moves": len(moves),
             "sustained": sum(x and y for *_, x, y in pairs),
             "ours_sustained": sum(x for *_, x, _ in pairs),
@@ -124,6 +128,23 @@ def panel(notes) -> dict[str, float]:
             "repeat": float(np.mean([a == b for a, b in zip(shapes, shapes[1:], strict=False)])),
             "sustain": float(np.mean([n > 0 for *_, n in notes])),
             "entropy": float(-(share * np.log2(share)).sum())}
+
+
+def row_style(notes) -> dict[str, float]:
+    """Counts behind the row style of one tier: switches between the white
+    row, the black row and mixed shapes from one fretted note to the next,
+    the row runs, and how many singles sit on the black row."""
+    rows = [0 if max(s) < 3 else 1 if min(s) >= 3 else 2 for _, s, _ in notes if s]
+    runs = [len(list(group)) for _, group in groupby(rows)]
+    singles = [s for _, s, _ in notes if len(s) == 1]
+    return {"switches": sum(a != b for a, b in pairwise(rows)), "pairs": max(len(rows) - 1, 0),
+            "runs": runs, "singles": len(singles), "black_singles": sum(min(s) >= 3 for s in singles),
+            "notes": len(notes)}
+
+
+def row_line(t: dict) -> str:
+    return (f"switch {t['switches'] / max(t['pairs'], 1):.0%}, run median {np.median(t['runs']) if t['runs'] else 0:g}, "
+            f"black singles {t['black_singles'] / max(t['singles'], 1):.0%}, singles {t['singles'] / max(t['notes'], 1):.0%}")
 
 
 def population(features: Path, stats_path: Path, holdout: set[str]) -> dict:
@@ -210,7 +231,8 @@ def zline(z: dict[str, dict[str, float]]) -> str:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--charts", type=Path, default=Path("data/ghl-official"))
-    ap.add_argument("-n", type=int, default=10, help="holdout songs to chart")
+    ap.add_argument("-n", type=int, default=10, help="holdout songs to chart, 0 for every held-out song")
+    ap.add_argument("--seed", type=int, help="pick the songs at random with this seed instead of by name")
     ap.add_argument("--out", type=Path, default=Path("data/ghl-eval"))
     ap.add_argument("--features", type=Path, default=Path("data/ghl-features"),
                     help="official records the style population is built from")
@@ -220,8 +242,14 @@ def main(argv=None):
 
     holdout = set(torch.load(ghl.MODEL_PATH, map_location="cpu")["holdout"])
     population_stats = population(args.features, args.stats, holdout)
-    folders = sorted(p.parent for p in args.charts.rglob("notes.mid")
-                     if song_key(p.parent.name) in holdout)[:args.n]
+    by_key = {}
+    for folder in sorted(p.parent for p in args.charts.rglob("notes.mid") if song_key(p.parent.name) in holdout):
+        by_key.setdefault(song_key(folder.name), folder)
+    folders = list(by_key.values())
+    if args.seed is not None:
+        random.Random(args.seed).shuffle(folders)
+    folders = folders[:args.n or None]
+    style = {who: {d: {} for d in ROW_DIFFS} for who in ("chartgen", "official")}
     totals = {d: {} for d in DIFFS}
     flags = {"chartgen": [], "official": []}
     consistency = {"chartgen": [], "official": []}
@@ -253,6 +281,10 @@ def main(argv=None):
         for who in flags:
             flags[who].append(sum(abs(v) > FLAG_Z for v in z[who].values()))
         print(f"  style z chartgen/official: {zline(z)}")
+        for who, tiers in (("chartgen", ours), ("official", theirs)):
+            for d in ROW_DIFFS:
+                for key, value in row_style(tiers[d]).items():
+                    style[who][d][key] = style[who][d].get(key, 0 if key != "runs" else []) + value
         pairs = repeats(official, delay)
         own = {"chartgen": self_precision(ours["Expert"], pairs),
                "official": self_precision(theirs["Expert"], pairs)}
@@ -271,6 +303,10 @@ def main(argv=None):
               f"row {t['row'] / m:.0%}, direction {t['direction'] / max(t['moves'], 1):.0%}")
         base = {k.removeprefix("chance "): v for k, v in t.items() if k.startswith("chance ")}
         print(f"       {versus(t, base)}; {sustain_pr(t)}")
+    for d in ROW_DIFFS:
+        t = totals[d]
+        print(f"{d:6s} row on matches {t['row'] / max(t['matched'], 1):.0%}, all non-black {t['row_rest'] / max(t['matched'], 1):.0%}; "
+              f"style chartgen {row_line(style['chartgen'][d])} | official {row_line(style['official'][d])}")
     songs = max(len(flags["chartgen"]), 1)
     print(f"style flags (Expert, |z| > {FLAG_Z:g} against {population_stats['songs']} official training songs): "
           + "; ".join(f"{who} >= 1 {sum(n >= 1 for n in counts) / songs:.0%}, "
