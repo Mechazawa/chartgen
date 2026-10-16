@@ -198,7 +198,7 @@ def test_ghl_tiers_follow_the_official_ladder_and_sustain_rules():
         try:
             events = [(0.5 + i * 0.5, 0.7 + i * 0.5, 40 + i % 24, 0.8) for i in range(150)]
             tempo = steady(n=200)
-            out = ghl.chart_tiers(tempo, np.ones(4000, dtype=np.float32), events, {"guitar": events})
+            out = ghl.chart_tiers(tempo, np.ones(4000, dtype=np.float32), {}, events, {"guitar": events})
         finally:
             ghl.MODEL_PATH = saved_path
             ghl._MODELS.clear()
@@ -267,6 +267,30 @@ def test_ghl_tier_sustains_run_to_the_tiers_next_note_when_it_is_far_enough():
     # Expert; the last kept note has no next note to run to.
     assert out.tolist() == [960, 0, 1920, 0, 0]
 
+
+
+def test_ghl_bars_whose_audio_repeats_take_the_earlier_bars_notes():
+    from chartgen import ghl
+
+    rng = np.random.default_rng(0)
+    tempo = steady(n=80)
+    bar = ghl.BAR_BEATS * RESOLUTION
+    frames = int(tempo.beat_to_time(80) * ghl.ENVELOPE_SR / ghl.ENVELOPE_HOP) + 10
+    envelope = rng.random(frames).astype(np.float32)
+    riff = rng.random(int(tempo.beat_to_time(4) * ghl.ENVELOPE_SR / ghl.ENVELOPE_HOP)).astype(np.float32)
+    start = int((tempo.beat_to_time(0) - ghl.ONSET_LAG_S) * ghl.ENVELOPE_SR / ghl.ENVELOPE_HOP)
+    for k in range(4):  # bars 0-3 carry the same audio, the rest is noise
+        begin = int(tempo.beat_to_time(k * 4) * ghl.ENVELOPE_SR / ghl.ENVELOPE_HOP)
+        envelope[begin - start:begin - start + len(riff)] = riff
+    ticks = np.sort(rng.choice(np.arange(0, 16 * bar, RESOLUTION // 4), 120, replace=False))
+    shapes = rng.integers(1, 64, len(ticks))
+    out_ticks, out_shapes, origin = ghl.copy_repeated_bars(ticks, shapes, tempo, 0, envelope, {}, [], {})
+    first = [(t, s) for t, s in zip(out_ticks, out_shapes, strict=True) if t < bar]
+    for k in (1, 2, 3):
+        later = [(t - k * bar, s) for t, s in zip(out_ticks, out_shapes, strict=True) if k * bar <= t < (k + 1) * bar]
+        assert later == first, k
+    assert (origin[out_ticks >= bar][:len(first)] >= 0).all()
+    assert (origin[out_ticks >= 4 * bar] == -1).mean() > 0.5
 
 def test_write_chart_merges_lyrics_into_events_in_tick_order():
     t = steady()

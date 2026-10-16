@@ -42,7 +42,17 @@ GRID = 4  # 16ths, the grid the tier features describe
 SLOTS_PER_BEAT = 12  # 16ths plus 8th and 16th triplets: every official note but 32nds
 ENVELOPE_SR, ENVELOPE_HOP = 22050, 512
 ENVELOPE_FRAMES = 2  # envelope samples either side of a slot
-N_TIMING = N_FEATURES - 2 + 7 + 2 * ENVELOPE_FRAMES + 1
+# The separated guitar's onset envelope tells official note times from
+# false picks far better than the mix's (AUC 0.78 against 0.58).
+STEM_ENVELOPES = ("guitar", "bass", "drums", "vocals", "piano", "sw_other")
+CONTRAST_FRAMES = 20  # the guitar's local level, against which its peak counts
+ENVELOPE_CAP = 10.0
+# A bar whose audio matches one of the REPEAT_BARS bars before it at
+# REPEAT_Z standard deviations above the song's mean bar-pair similarity
+# takes that bar's notes. On the held-out songs this repeats 32% of bars
+# (official charts 38%, without it 2%) for one point of precision and recall.
+BAR_BEATS, REPEAT_BARS, REPEAT_Z = 4, 8, 2.0
+N_TIMING = N_FEATURES - 2 + 7 + (1 + len(STEM_ENVELOPES)) * (2 * ENVELOPE_FRAMES + 1) + 1
 # Official Expert notes with at least this long a gap to the next note are
 # sustained, to that next note (F1 0.80 on held-out songs; opens never are).
 SUSTAIN_GAP_S = 0.3
@@ -196,11 +206,13 @@ def slots(tempo, end_s: float) -> tuple[np.ndarray, np.ndarray]:
     return ticks, np.array([tempo.beat_to_time(t / tempo.resolution) for t in ticks])
 
 
-def timing_features(ticks: np.ndarray, times: np.ndarray, res: int, envelope: np.ndarray, mix_events,
-                    stem_events: dict) -> np.ndarray:
+def timing_features(ticks: np.ndarray, times: np.ndarray, res: int, envelope: np.ndarray,
+                    stem_envelopes: dict, mix_events, stem_events: dict) -> np.ndarray:
     """[N, N_TIMING] per slot: the pitch statistics of features(), how many
     onsets of any stream fall within MERGE_S and how far the nearest is,
-    the onset envelope around it, and which grids it belongs to."""
+    which grids it belongs to, the onset envelope of the mix and of every
+    STEM_ENVELOPES stem around it, and the guitar's peak over its local
+    level. A missing stem reads as silence."""
     beat = ticks / res
     x = features(times, beat % 1, np.zeros_like(times), mix_events, stem_events)
     x = np.delete(x, [N_FEATURES - 4, N_FEATURES - 1], axis=1)  # sustain and key shift
@@ -212,12 +224,22 @@ def timing_features(ticks: np.ndarray, times: np.ndarray, res: int, envelope: np
     else:
         nearest = np.full(len(times), 1.0)
     frame = np.round((times + ONSET_LAG_S) * ENVELOPE_SR / ENVELOPE_HOP).astype(int)
-    around = np.stack([envelope[np.clip(frame + d, 0, len(envelope) - 1)] if len(envelope) else np.zeros(len(times))
-                       for d in range(-ENVELOPE_FRAMES, ENVELOPE_FRAMES + 1)], 1)
+
+    def around(env, frames):
+        # A near-silent stem's envelope over its own 95th percentile can
+        # overflow float16 storage; cap it at ENVELOPE_CAP.
+        env = np.clip(np.nan_to_num(np.asarray(env, dtype=np.float32), posinf=ENVELOPE_CAP), 0, ENVELOPE_CAP)
+        return np.stack([env[np.clip(frame + d, 0, len(env) - 1)] if len(env) else np.zeros(len(times))
+                         for d in frames], 1)
+
+    near = range(-ENVELOPE_FRAMES, ENVELOPE_FRAMES + 1)
+    stems = [around(stem_envelopes.get(name, ()), near) for name in STEM_ENVELOPES]
+    guitar = stem_envelopes.get("guitar", ())
+    contrast = stems[0].max(1) - around(guitar, range(-CONTRAST_FRAMES, CONTRAST_FRAMES + 1)).mean(1)
     slot = ticks % res * SLOTS_PER_BEAT // res
     grid = np.stack([np.log1p(high - low), np.log1p(nearest * 100), slot % 3 == 0, slot % 4 == 0,
                      slot % 2 == 0, np.sin(np.pi * beat), np.cos(np.pi * beat)], 1)
-    return np.hstack([x, grid, around]).astype(np.float32)
+    return np.hstack([x, grid, around(envelope, near), *stems, contrast[:, None]]).astype(np.float32)
 
 
 def pick_slots(logits: np.ndarray, times: np.ndarray, threshold: float) -> np.ndarray:
@@ -416,9 +438,10 @@ def _models(device: str):
     return _MODELS[device]
 
 
-def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
+def chart_tiers(tempo, envelope, stem_envelopes, mix_events, stem_events) -> dict[str, list]:
     """{"ExpertGHLGuitar": notes, "HardGHLGuitar": ...}, or {} when no
-    trained model ships. envelope is onset_envelope() of the mix."""
+    trained model ships. envelope is onset_envelope() of the mix and
+    stem_envelopes the same for each separated stem."""
     onsets = [e[0] for events in [mix_events, *stem_events.values()] for e in events]
     if not MODEL_PATH.is_file() or not onsets:
         return {}
@@ -427,7 +450,7 @@ def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
     allowed = saved["allowed"]
     res = tempo.resolution
     slot_ticks, slot_times = slots(tempo, max(onsets) + 1.0)
-    x = timing_features(slot_ticks, slot_times, res, envelope, mix_events, stem_events)
+    x = timing_features(slot_ticks, slot_times, res, envelope, stem_envelopes, mix_events, stem_events)
     ticks = slot_ticks[pick_slots(windowed(timing_net, x, device)[:, 0], slot_times, saved["timing_threshold"])]
     if not len(ticks):
         return {}
@@ -438,9 +461,16 @@ def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
     sustain_s = np.array([tempo.beat_to_time((t + s) / res) for t, s in zip(ticks, expert_sustain, strict=True)]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)
     shapes = figure_shapes(windowed(shape_net, x, device), allowed["Expert"], saved["quota_power"])
-    sustained &= shapes != 0
-    expert_sustain[~sustained] = 0
     downbeat = None if tempo.downbeat_phase is None else tempo.pickup_beats + tempo.downbeat_phase
+    origin = np.full(len(ticks), -1)
+    if downbeat is not None:
+        ticks, shapes, origin = copy_repeated_bars(ticks, shapes, tempo, downbeat, envelope, stem_envelopes,
+                                                   mix_events, stem_events)
+        times = np.array([tempo.beat_to_time(t / res) for t in ticks])
+        everywhere = np.ones(len(ticks), bool)
+        sustained = np.diff(times, append=times[-1]) >= SUSTAIN_GAP_S
+    sustained &= shapes != 0
+    expert_sustain = sustains(ticks, everywhere, sustained, 0, res)
     tier_x = tier_features(ticks, expert_sustain, shapes, res, downbeat)
     reduced = windowed(reduce_net, reduce_inputs(shapes, tier_x), device)
 
@@ -450,12 +480,80 @@ def chart_tiers(tempo, envelope, mix_events, stem_events) -> dict[str, list]:
 
     out = {"ExpertGHLGuitar": notes(everywhere, shapes, expert_sustain)}
     kept = nested_keep(reduced[..., 0], ticks, saved["keep_share"], res)
+    copies = np.flatnonzero(origin >= 0)
     for k, tier in enumerate(TIERS):
         tier_shapes = np.zeros(len(ticks), dtype=np.int64)
         tier_shapes[kept[tier]] = viterbi(reduced[kept[tier], k, 1:], allowed[tier], saved["switch_weights"][tier])
+        for i in copies:  # sources come first, so copies of copies follow them
+            kept[tier][i], tier_shapes[i] = kept[tier][origin[i]], tier_shapes[origin[i]]
         tier_sustain = sustains(ticks, kept[tier], sustained & (tier_shapes != 0), TIER_SUSTAIN_BEATS[tier], res)
         out[f"{tier}GHLGuitar"] = notes(kept[tier], tier_shapes, tier_sustain)
     return out
+
+
+def _bar_similarity(slot_times: np.ndarray, bar_count: int, envelope, stem_envelopes, events) -> np.ndarray:
+    """[bars, bars] mean of the Pearson correlations of the mix's and the
+    guitar's onset envelope per slot and the cosine of per-slot chroma,
+    z-scored over the song's bar pairs."""
+    def per_slot(env):
+        env = np.clip(np.nan_to_num(np.asarray(env, dtype=np.float32), posinf=ENVELOPE_CAP), 0, ENVELOPE_CAP)
+        frame = np.round((slot_times + ONSET_LAG_S) * ENVELOPE_SR / ENVELOPE_HOP).astype(int)
+        return np.max([env[np.clip(frame + d, 0, len(env) - 1)] for d in (-1, 0, 1)], axis=0).reshape(bar_count, -1)
+
+    chroma = np.zeros((len(slot_times), 12), dtype=np.float32)
+    if events:
+        ev = np.asarray(events, dtype=np.float64)
+        at = np.clip(np.searchsorted(slot_times, ev[:, 0]), 1, len(slot_times) - 1)
+        nearest = np.where(np.abs(slot_times[at] - ev[:, 0]) < np.abs(slot_times[at - 1] - ev[:, 0]), at, at - 1)
+        close = np.abs(slot_times[nearest] - ev[:, 0]) <= MERGE_S
+        np.add.at(chroma, (nearest[close], ev[close, 2].astype(int) % 12), ev[close, 3])
+
+    def pearson(rows):
+        rows = rows - rows.mean(1, keepdims=True)
+        norm = np.linalg.norm(rows, axis=1)
+        return rows @ rows.T / np.maximum(norm[:, None] * norm[None, :], 1e-6)
+
+    flat = chroma.reshape(bar_count, -1)
+    norm = np.linalg.norm(flat, axis=1)
+    blocks = [pearson(per_slot(envelope)), flat @ flat.T / np.maximum(norm[:, None] * norm[None, :], 1e-6)]
+    if len(stem_envelopes.get("guitar", ())):
+        blocks.append(pearson(per_slot(stem_envelopes["guitar"])))
+    sim = np.mean(blocks, axis=0)
+    pairs = sim[np.triu_indices(bar_count, 1)]
+    return (sim - pairs.mean()) / max(pairs.std(), 1e-6)
+
+
+def copy_repeated_bars(ticks: np.ndarray, shapes: np.ndarray, tempo, downbeat: int, envelope, stem_envelopes,
+                       mix_events, stem_events) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(ticks, shapes, origin): every bar whose audio repeats one of the
+    REPEAT_BARS bars before it (above REPEAT_Z) takes that bar's notes, in
+    order, so a copy can be the source of a later copy. origin is, per
+    note, the index of the note it repeats, or -1."""
+    res = tempo.resolution
+    bar_len, start = BAR_BEATS * res, downbeat * res
+    bar_count = int((ticks[-1] - start) // bar_len) + 1 if ticks[-1] >= start else 0
+    if bar_count < 2:
+        return ticks, shapes, np.full(len(ticks), -1)
+    slot_ticks = start + np.arange(bar_count * BAR_BEATS * SLOTS_PER_BEAT) * (res // SLOTS_PER_BEAT)
+    slot_times = np.array([tempo.beat_to_time(t / res) for t in slot_ticks])
+    sim = _bar_similarity(slot_times, bar_count, envelope, stem_envelopes,
+                          list(mix_events) + list(stem_events.get("guitar", [])))
+    bar_of = np.where(ticks >= start, (ticks - start) // bar_len, -1)
+    out_ticks, out_shapes, origin = list(ticks[bar_of < 0]), list(shapes[bar_of < 0]), [-1] * int((bar_of < 0).sum())
+    placed: dict[int, list[int]] = {}
+    for bar in range(bar_count):
+        earlier = np.arange(max(0, bar - REPEAT_BARS), bar)
+        source = earlier[np.argmax(sim[bar, earlier])] if len(earlier) else -1
+        if source >= 0 and sim[bar, source] > REPEAT_Z:
+            notes = [(out_ticks[i] + (bar - source) * bar_len, out_shapes[i], i) for i in placed.get(source, [])]
+        else:
+            notes = [(t, s, -1) for t, s in zip(ticks[bar_of == bar], shapes[bar_of == bar], strict=True)]
+        placed[bar] = list(range(len(out_ticks), len(out_ticks) + len(notes)))
+        for tick, shape, came_from in notes:
+            out_ticks.append(int(tick))
+            out_shapes.append(int(shape))
+            origin.append(came_from)
+    return np.array(out_ticks, dtype=np.int64), np.array(out_shapes, dtype=np.int64), np.array(origin)
 
 
 def _log_softmax(logits: np.ndarray) -> np.ndarray:

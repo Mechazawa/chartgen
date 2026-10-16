@@ -794,13 +794,16 @@ def _finish_chart(opts, progress, check, y, sr, tempo, expert, best,
     if getattr(opts, "ghl", True) and bp_events:
         from . import ghl
 
+        from . import stems as stemsmod
+
+        mono = stemsmod.separate(str(audio), progress, backend="sw") or {}
         if "guitar" not in (stem_events or {}):
             from . import prominence
-            from . import stems as stemsmod
 
-            mono = stemsmod.separate(str(audio), progress, backend="sw")
             stem_events = prominence.transcribe_stems(mono, stemsmod.SR) if mono else {}
-        ghl_tiers = ghl.chart_tiers(tempo, ghl.onset_envelope(y, sr), bp_events, stem_events)
+        stem_envelopes = {name: ghl.onset_envelope(mono[name], stemsmod.SR)
+                          for name in ghl.STEM_ENVELOPES if name in mono}
+        ghl_tiers = ghl.chart_tiers(tempo, ghl.onset_envelope(y, sr), stem_envelopes, bp_events, stem_events)
         if ghl_tiers:
             tiers |= ghl_tiers
             progress(f"      6-fret: {len(_group(ghl_tiers['ExpertGHLGuitar']))} Expert "

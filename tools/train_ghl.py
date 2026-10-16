@@ -130,7 +130,8 @@ def timing_arrays(record: dict, delay_s: float) -> tuple[dict, tuple]:
     nearest = np.where(np.abs(times[k] - official) < np.abs(times[k - 1] - official), k, k - 1)
     label = np.zeros(len(times), dtype=np.float32)
     label[nearest[np.abs(times[nearest] - official) <= SLOT_MATCH_S]] = 1
-    x = ghl.timing_features(ticks, times, tempo.RESOLUTION, record["onset_env"], record["mix"], record["stems"])
+    x = ghl.timing_features(ticks, times, tempo.RESOLUTION, record["onset_env"], record.get("stem_env", {}),
+                            record["mix"], record["stems"])
     return {"x": x.astype(np.float16), "label": label}, (ticks, times, official)
 
 
