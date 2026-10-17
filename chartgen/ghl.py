@@ -52,6 +52,10 @@ ENVELOPE_CAP = 10.0
 # takes that bar's notes. On the held-out songs this repeats 32% of bars
 # (official charts 38%, without it 2%) for one point of precision and recall.
 BAR_BEATS, REPEAT_BARS, REPEAT_Z = 4, 8, 2.0
+# Inside a passage of this many bars every transcribed pitch keeps one
+# shape: the official charts give a pitch one shape 70-73% of the time per
+# 4 bars, and per-note or per-figure picks move every note of a riff.
+PASSAGE_BARS = 16
 N_TIMING = N_FEATURES - 2 + 7 + (1 + len(STEM_ENVELOPES)) * (2 * ENVELOPE_FRAMES + 1) + 1
 # Official Expert notes with at least this long a gap to the next note are
 # sustained, to that next note (F1 0.80 on held-out songs; opens never are).
@@ -460,8 +464,9 @@ def chart_tiers(tempo, envelope, stem_envelopes, mix_events, stem_events) -> dic
     expert_sustain = sustains(ticks, everywhere, sustained, 0, res)
     sustain_s = np.array([tempo.beat_to_time((t + s) / res) for t, s in zip(ticks, expert_sustain, strict=True)]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)
-    shapes = figure_shapes(windowed(shape_net, x, device), allowed["Expert"], saved["quota_power"])
     downbeat = None if tempo.downbeat_phase is None else tempo.pickup_beats + tempo.downbeat_phase
+    shapes = figure_shapes(windowed(shape_net, x, device), allowed["Expert"], saved["quota_power"],
+                           pitch_keys(times, ticks, res, downbeat, mix_events, stem_events))
     origin = np.full(len(ticks), -1)
     if downbeat is not None:
         ticks, shapes, origin = copy_repeated_bars(ticks, shapes, tempo, downbeat, envelope, stem_envelopes,
@@ -560,39 +565,54 @@ def _log_softmax(logits: np.ndarray) -> np.ndarray:
     return logits - np.logaddexp.reduce(logits, axis=-1, keepdims=True)
 
 
-def figure_shapes(logits: np.ndarray, allowed, power: float) -> np.ndarray:
-    """Expert shapes from ShapeNet's output. A figure (a run of one shape)
-    starts wherever the relation head gives P(SAME) <= FIGURE_SAME. Each
-    figure gets one shape, chosen by a MILP that maximises the total log
+def pitch_keys(times: np.ndarray, ticks: np.ndarray, res: int, downbeat: int | None, mix_events,
+               stem_events: dict) -> np.ndarray | None:
+    """Per note: one key per (PASSAGE_BARS passage, loudest transcribed
+    pitch at the onset, guitar stem first), or -1 where no pitch is heard;
+    None without a downbeat."""
+    if downbeat is None:
+        return None
+    guitar = _pitch_rows(stem_events.get("guitar") or [], times, False)
+    rows = np.where((guitar.max(1) > HEARD)[:, None], guitar, _pitch_rows(mix_events or [], times, False))
+    passage = (ticks - downbeat * res) // (PASSAGE_BARS * BAR_BEATS * res)
+    return np.where(rows.max(1) > HEARD, passage * PITCHES + rows.argmax(1), -1)
+
+
+def figure_shapes(logits: np.ndarray, allowed, power: float, keys: np.ndarray | None = None) -> np.ndarray:
+    """Expert shapes from ShapeNet's output. Notes group by keys (see
+    pitch_keys) where given and heard, else by figure: a run of one shape
+    starting wherever the relation head gives P(SAME) <= FIGURE_SAME. Each
+    group gets one shape, chosen by a MILP that maximises the total log
     probability while every shape's note count stays within QUOTA_BOUNDS of
-    its quota, and two neighbouring figures differ where P(SAME) <=
-    DIFFERENT_SAME. The quota is the song's expected count of the shape
+    its quota; without keys, two neighbouring figures also differ where
+    P(SAME) <= DIFFERENT_SAME. The quota is the song's expected count of the shape
     ** power, rescaled so each chord size keeps its expected note count:
     the power concentrates a song on fewer shapes without changing how
     many notes are single. Per-note picks put the same few shapes
-    everywhere. When the MILP finds no solution in MILP_SECONDS, each
-    figure takes its best shape."""
+    everywhere. When the MILP finds no solution in MILP_SECONDS, the keyed
+    decode falls back to figures, and figures take their best shape."""
     mask = np.full(1 << BUTTONS, -np.inf)
     mask[list(allowed)] = 0
     logp = _log_softmax(logits[:, :1 << BUTTONS] + mask)
     same = np.exp(_log_softmax(logits[:, 1 << BUTTONS:]))[:, SAME]
     starts = np.concatenate([[True], same[1:] <= FIGURE_SAME])
     figure = np.cumsum(starts) - 1
+    group = figure if keys is None else np.unique(np.where(keys >= 0, keys, -1 - figure), return_inverse=True)[1]
     expected = np.exp(logp).sum(0)
     size = FACTOR_OF[:, 0]
     sharp = expected ** power
     quota = (sharp * np.bincount(size, weights=expected)[size]
              / np.maximum(np.bincount(size, weights=sharp)[size], 1e-12))[list(allowed)]
-    gain = np.zeros((figure[-1] + 1, len(logp[0])))
-    np.add.at(gain, figure, logp)
+    gain = np.zeros((group.max() + 1, len(logp[0])))
+    np.add.at(gain, group, logp)
     gain = gain[:, list(allowed)]
-    n_figures, n_shapes = gain.shape
+    n_groups, n_shapes = gain.shape
     choices = np.arange(gain.size)
-    one_shape = coo_matrix((np.ones(gain.size), (choices // n_shapes, choices)), shape=(n_figures, gain.size))
-    notes = coo_matrix((np.bincount(figure)[choices // n_shapes].astype(float), (choices % n_shapes, choices)),
+    one_shape = coo_matrix((np.ones(gain.size), (choices // n_shapes, choices)), shape=(n_groups, gain.size))
+    notes = coo_matrix((np.bincount(group)[choices // n_shapes].astype(float), (choices % n_shapes, choices)),
                        shape=(n_shapes, gain.size))
     # One row per shape and figure f whose next figure starts with P(SAME) <= DIFFERENT_SAME.
-    sure = np.flatnonzero(same[starts][1:] <= DIFFERENT_SAME)
+    sure = np.flatnonzero(same[starts][1:] <= DIFFERENT_SAME) if keys is None else np.zeros(0, dtype=np.int64)
     pair = (sure[:, None] * n_shapes + np.arange(n_shapes)).ravel()
     different = coo_matrix((np.ones(2 * len(pair)), (np.tile(np.arange(len(pair)), 2),
                                                       np.concatenate([pair, pair + n_shapes]))),
@@ -604,8 +624,10 @@ def figure_shapes(logits: np.ndarray, allowed, power: float) -> np.ndarray:
                                                np.ceil(quota * high) + 2),
                               LinearConstraint(different, 0, 1)],
                  options={"time_limit": MILP_SECONDS})
+    if found.x is None and keys is not None:
+        return figure_shapes(logits, allowed, power)
     best = gain.argmax(1) if found.x is None else found.x.reshape(gain.shape).argmax(1)
-    return np.array(allowed)[best][figure]
+    return np.array(allowed)[best][group]
 
 
 def viterbi(logits: np.ndarray, allowed, switch_weight: float) -> np.ndarray:

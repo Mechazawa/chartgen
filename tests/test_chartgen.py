@@ -246,6 +246,23 @@ def test_ghl_expert_figures_take_one_shape_each_within_the_songs_quota():
     assert all(len(set(out[i:i + 4])) == 1 for i in range(0, 20, 4)), out
 
 
+def test_ghl_expert_notes_of_one_pitch_in_a_passage_share_a_shape():
+    """With pitch keys, every note of a key takes one shape even where the
+    relation head splits them into separate figures; unheard notes (-1)
+    keep their figures."""
+    from chartgen import ghl
+
+    rng = np.random.default_rng(1)
+    relations = np.zeros((24, ghl.RELATIONS))
+    relations[:, ghl.SAME] = -5.0  # every note its own figure
+    keys = np.array([60, 67, 60, 72] * 5 + [-1] * 4)
+    shapes = rng.normal(size=(24, 64)) - 30.0
+    shapes[:, [1, 2, 4, 8]] = rng.normal(size=(24, 4))  # the song uses four shapes
+    out = ghl.figure_shapes(np.hstack([shapes, relations]), list(range(64)), 1.0, keys)
+    for key in (60, 67, 72):
+        assert len(set(out[keys == key])) == 1, (key, out)
+
+
 def test_ghl_tier_switch_weight_keeps_the_row():
     from chartgen import ghl
 

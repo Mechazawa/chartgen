@@ -110,11 +110,12 @@ def song_arrays(record: dict, delay_s: float) -> dict:
     k = np.clip(np.searchsorted(grid.beat_times, bars), 1, len(grid.beat_times) - 1)
     nearest = np.where(np.abs(grid.beat_times[k] - bars) < np.abs(grid.beat_times[k - 1] - bars), k, k - 1)
     votes = np.bincount(nearest[np.abs(grid.beat_times[nearest] - bars) <= DOWNBEAT_MATCH_S] % 4, minlength=4)
-    return {"downbeat": grid.pickup_beats + int(votes.argmax()) if votes.any() else None,
-            "x": x.astype(np.float16), "seconds": times, "sustained": sustain_s > 0, "shapes": shapes, "keep": keep,
-            "tier_shapes": tier_shapes, "offset": offset,
-            "grid_ticks": (np.round(beats * ghl.GRID) * tempo.RESOLUTION // ghl.GRID).astype(np.int64),
-            "sustain_ticks": np.round(sustain_beats * tempo.RESOLUTION).astype(np.int64)}
+    downbeat = grid.pickup_beats + int(votes.argmax()) if votes.any() else None
+    grid_ticks = (np.round(beats * ghl.GRID) * tempo.RESOLUTION // ghl.GRID).astype(np.int64)
+    return {"downbeat": downbeat, "x": x.astype(np.float16), "seconds": times, "sustained": sustain_s > 0,
+            "shapes": shapes, "keep": keep, "tier_shapes": tier_shapes, "offset": offset, "grid_ticks": grid_ticks,
+            "sustain_ticks": np.round(sustain_beats * tempo.RESOLUTION).astype(np.int64),
+            "pitch_keys": ghl.pitch_keys(times, grid_ticks, tempo.RESOLUTION, downbeat, record["mix"], record["stems"])}
 
 
 def timing_arrays(record: dict, delay_s: float) -> tuple[dict, tuple]:
@@ -414,7 +415,7 @@ def pick_quota_power(shape_net, songs, population, device, allowed) -> float:
     official = np.concatenate([s["shapes"] for s in songs])
     logits = [ghl.windowed(shape_net, s["x"].astype(np.float32), device) for s in songs]
     for power in QUOTA_POWERS:
-        preds = [ghl.figure_shapes(lg, allowed, power) for lg in logits]
+        preds = [ghl.figure_shapes(lg, allowed, power, s["pitch_keys"]) for lg, s in zip(logits, songs, strict=True)]
         decoded = np.concatenate(preds)
         z = np.mean([(panel(style_notes(s["seconds"], pred, s["sustained"]))["entropy"] - np.mean(entropy))
                      / np.std(entropy) for pred, s in zip(preds, songs, strict=True)])
@@ -484,7 +485,7 @@ def evaluate(shape_net, reduce_net, songs, device, allowed, power, switch_weight
     preds = []
     for song in songs:
         x = song["x"].astype(np.float32)
-        pred = ghl.figure_shapes(ghl.windowed(shape_net, x, device), allowed["Expert"], power)
+        pred = ghl.figure_shapes(ghl.windowed(shape_net, x, device), allowed["Expert"], power, song["pitch_keys"])
         preds.append(pred)
         hits += structure_score(pred, song["shapes"])
         total += len(pred)
@@ -585,8 +586,8 @@ def main(argv=None):
     allowed = allowed_shapes(train_songs)
     board.add_text("temperature", str(calibrate_shapes(shape_net, val_songs, device, allowed["Expert"])))
     power = pick_quota_power(shape_net, val_songs, train_songs, device, allowed["Expert"])
-    expert = [ghl.figure_shapes(ghl.windowed(shape_net, s["x"].astype(np.float32), device), allowed["Expert"], power)
-              for s in val_songs]
+    expert = [ghl.figure_shapes(ghl.windowed(shape_net, s["x"].astype(np.float32), device), allowed["Expert"], power,
+                                s["pitch_keys"]) for s in val_songs]
     switch_weights = calibrate_switches(reduce_net, val_songs, expert, device, allowed, keep_share(train_songs))
     board.add_text("decode", f"quota power {power}, switch weights {switch_weights}")
     threshold = timing_threshold(timing_net, *zip(*val_timing, strict=True), device)
