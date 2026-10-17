@@ -49,9 +49,10 @@ CONTRAST_FRAMES = 20  # the guitar's local level, against which its peak counts
 ENVELOPE_CAP = 10.0
 # A bar whose audio matches one of the REPEAT_BARS bars before it at
 # REPEAT_Z standard deviations above the song's mean bar-pair similarity
-# takes that bar's notes. On the held-out songs this repeats 32% of bars
-# (official charts 38%, without it 2%) for one point of precision and recall.
-BAR_BEATS, REPEAT_BARS, REPEAT_Z = 4, 8, 2.0
+# takes that bar's notes, after pool_repeats. On the held-out songs 38% of
+# Expert bars repeat one of the 8 before them (official 41%, without it 1%)
+# at unchanged precision and recall; z 1.25 gives 46% at -1 point each.
+BAR_BEATS, REPEAT_BARS, REPEAT_Z = 4, 8, 1.5
 # Inside a passage of this many bars every transcribed pitch keeps one
 # shape: the official charts give a pitch one shape 70-73% of the time per
 # 4 bars, and per-note or per-figure picks move every note of a riff.
@@ -68,6 +69,10 @@ TIER_FEATURES = 25
 FIGURE_SAME = 0.5  # P(SAME) at or below which a note starts a new figure
 DIFFERENT_SAME = 0.35  # P(SAME) at or below which a new figure must change shape
 QUOTA_BOUNDS = (0.7, 1.1)  # share of its quota each Expert shape may use
+# Two buttons next to each other on one row. ShapeNet's calibrated softmax gives them half their official share of
+# 2-button notes and the quota power half of that again, so figure_shapes can split the 2-button quota by the
+# official share instead (model file "adjacent_share").
+ROW_ADJACENT = np.isin(np.arange(1 << BUTTONS), [0b11, 0b110, 0b11000, 0b110000])
 MILP_SECONDS = 20
 
 
@@ -455,7 +460,11 @@ def chart_tiers(tempo, envelope, stem_envelopes, mix_events, stem_events) -> dic
     res = tempo.resolution
     slot_ticks, slot_times = slots(tempo, max(onsets) + 1.0)
     x = timing_features(slot_ticks, slot_times, res, envelope, stem_envelopes, mix_events, stem_events)
-    ticks = slot_ticks[pick_slots(windowed(timing_net, x, device)[:, 0], slot_times, saved["timing_threshold"])]
+    downbeat = None if tempo.downbeat_phase is None else tempo.pickup_beats + tempo.downbeat_phase
+    source = np.zeros(0, dtype=np.int64) if downbeat is None else repeat_sources(
+        slot_times, downbeat, envelope, stem_envelopes, list(mix_events) + list(stem_events.get("guitar", [])))
+    logits = pool_repeats(windowed(timing_net, x, device)[:, 0], downbeat, source)
+    ticks = slot_ticks[pick_slots(logits, slot_times, saved["timing_threshold"])]
     if not len(ticks):
         return {}
     times = np.array([tempo.beat_to_time(t / res) for t in ticks])
@@ -464,13 +473,12 @@ def chart_tiers(tempo, envelope, stem_envelopes, mix_events, stem_events) -> dic
     expert_sustain = sustains(ticks, everywhere, sustained, 0, res)
     sustain_s = np.array([tempo.beat_to_time((t + s) / res) for t, s in zip(ticks, expert_sustain, strict=True)]) - times
     x = features(times, (ticks % res) / res, sustain_s, mix_events, stem_events)
-    downbeat = None if tempo.downbeat_phase is None else tempo.pickup_beats + tempo.downbeat_phase
     shapes = figure_shapes(windowed(shape_net, x, device), allowed["Expert"], saved["quota_power"],
-                           pitch_keys(times, ticks, res, downbeat, mix_events, stem_events))
+                           pitch_keys(times, ticks, res, downbeat, mix_events, stem_events),
+                           saved["switch_weights"].get("Expert", 0.0), saved.get("adjacent_share"))
     origin = np.full(len(ticks), -1)
-    if downbeat is not None:
-        ticks, shapes, origin = copy_repeated_bars(ticks, shapes, tempo, downbeat, envelope, stem_envelopes,
-                                                   mix_events, stem_events)
+    if len(source):
+        ticks, shapes, origin = copy_repeated_bars(ticks, shapes, res, downbeat, source)
         times = np.array([tempo.beat_to_time(t / res) for t in ticks])
         everywhere = np.ones(len(ticks), bool)
         sustained = np.diff(times, append=times[-1]) >= SUSTAIN_GAP_S
@@ -528,29 +536,57 @@ def _bar_similarity(slot_times: np.ndarray, bar_count: int, envelope, stem_envel
     return (sim - pairs.mean()) / max(pairs.std(), 1e-6)
 
 
-def copy_repeated_bars(ticks: np.ndarray, shapes: np.ndarray, tempo, downbeat: int, envelope, stem_envelopes,
-                       mix_events, stem_events) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(ticks, shapes, origin): every bar whose audio repeats one of the
-    REPEAT_BARS bars before it (above REPEAT_Z) takes that bar's notes, in
-    order, so a copy can be the source of a later copy. origin is, per
-    note, the index of the note it repeats, or -1."""
-    res = tempo.resolution
-    bar_len, start = BAR_BEATS * res, downbeat * res
-    bar_count = int((ticks[-1] - start) // bar_len) + 1 if ticks[-1] >= start else 0
+def repeat_sources(slot_times: np.ndarray, downbeat: int, envelope, stem_envelopes, events) -> np.ndarray:
+    """Per whole bar from the downbeat (a beat number) on the slots() grid:
+    the bar among the REPEAT_BARS before it whose audio it repeats (above
+    REPEAT_Z), or -1."""
+    first = downbeat * SLOTS_PER_BEAT
+    bar_slots = BAR_BEATS * SLOTS_PER_BEAT
+    bar_count = max((len(slot_times) - first) // bar_slots, 0)
+    source = np.full(bar_count, -1)
     if bar_count < 2:
-        return ticks, shapes, np.full(len(ticks), -1)
-    slot_ticks = start + np.arange(bar_count * BAR_BEATS * SLOTS_PER_BEAT) * (res // SLOTS_PER_BEAT)
-    slot_times = np.array([tempo.beat_to_time(t / res) for t in slot_ticks])
-    sim = _bar_similarity(slot_times, bar_count, envelope, stem_envelopes,
-                          list(mix_events) + list(stem_events.get("guitar", [])))
+        return source
+    sim = _bar_similarity(slot_times[first:first + bar_count * bar_slots], bar_count, envelope, stem_envelopes, events)
+    for bar in range(1, bar_count):
+        earlier = np.arange(max(0, bar - REPEAT_BARS), bar)
+        best = earlier[np.argmax(sim[bar, earlier])]
+        source[bar] = best if sim[bar, best] > REPEAT_Z else -1
+    return source
+
+
+def pool_repeats(logits: np.ndarray, downbeat: int, source: np.ndarray) -> np.ndarray:
+    """TimingNet slot logits where every bar takes the mean over all bars
+    linked to it by repeat_sources, so a repeated riff is picked from the
+    evidence of all its repeats. Copying the earlier bar's notes without
+    pooling costs about 1.6 points of held-out Expert recall."""
+    if not len(source):
+        return logits
+    root = np.arange(len(source))
+    for bar in np.flatnonzero(source >= 0):
+        root[bar] = root[source[bar]]
+    first, bar_slots = downbeat * SLOTS_PER_BEAT, BAR_BEATS * SLOTS_PER_BEAT
+    span = slice(first, first + len(source) * bar_slots)
+    bars = logits[span].reshape(len(source), bar_slots)
+    means = np.zeros_like(bars)
+    np.add.at(means, root, bars)
+    pooled = logits.copy()
+    pooled[span] = (means / np.bincount(root, minlength=len(source))[:, None].clip(1))[root].ravel()
+    return pooled
+
+
+def copy_repeated_bars(ticks: np.ndarray, shapes: np.ndarray, res: int, downbeat: int,
+                       source: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(ticks, shapes, origin): every bar with a repeat_sources source takes
+    that bar's notes, in order, so a copy can be the source of a later copy.
+    origin is, per note, the index of the note it repeats, or -1."""
+    bar_len, start = BAR_BEATS * res, downbeat * res
     bar_of = np.where(ticks >= start, (ticks - start) // bar_len, -1)
     out_ticks, out_shapes, origin = list(ticks[bar_of < 0]), list(shapes[bar_of < 0]), [-1] * int((bar_of < 0).sum())
     placed: dict[int, list[int]] = {}
-    for bar in range(bar_count):
-        earlier = np.arange(max(0, bar - REPEAT_BARS), bar)
-        source = earlier[np.argmax(sim[bar, earlier])] if len(earlier) else -1
-        if source >= 0 and sim[bar, source] > REPEAT_Z:
-            notes = [(out_ticks[i] + (bar - source) * bar_len, out_shapes[i], i) for i in placed.get(source, [])]
+    for bar in range(int(bar_of.max()) + 1 if len(ticks) else 0):
+        came = source[bar] if bar < len(source) else -1
+        if came >= 0:
+            notes = [(out_ticks[i] + (bar - came) * bar_len, out_shapes[i], i) for i in placed.get(came, [])]
         else:
             notes = [(t, s, -1) for t, s in zip(ticks[bar_of == bar], shapes[bar_of == bar], strict=True)]
         placed[bar] = list(range(len(out_ticks), len(out_ticks) + len(notes)))
@@ -578,7 +614,8 @@ def pitch_keys(times: np.ndarray, ticks: np.ndarray, res: int, downbeat: int | N
     return np.where(rows.max(1) > HEARD, passage * PITCHES + rows.argmax(1), -1)
 
 
-def figure_shapes(logits: np.ndarray, allowed, power: float, keys: np.ndarray | None = None) -> np.ndarray:
+def figure_shapes(logits: np.ndarray, allowed, power: float, keys: np.ndarray | None = None,
+                  switch_weight: float = 0.0, adjacent_share: float | None = None) -> np.ndarray:
     """Expert shapes from ShapeNet's output. Notes group by keys (see
     pitch_keys) where given and heard, else by figure: a run of one shape
     starting wherever the relation head gives P(SAME) <= FIGURE_SAME. Each
@@ -588,9 +625,12 @@ def figure_shapes(logits: np.ndarray, allowed, power: float, keys: np.ndarray | 
     P(SAME) <= DIFFERENT_SAME. The quota is the song's expected count of the shape
     ** power, rescaled so each chord size keeps its expected note count:
     the power concentrates a song on fewer shapes without changing how
-    many notes are single. Per-note picks put the same few shapes
-    everywhere. When the MILP finds no solution in MILP_SECONDS, the keyed
-    decode falls back to figures, and figures take their best shape."""
+    many notes are single. With adjacent_share, the 2-button quota splits
+    between ROW_ADJACENT and other pairs by that share. Every change of row between two neighbouring
+    fretted notes of different groups costs switch_weight. Per-note picks
+    put the same few shapes everywhere. When the MILP finds no solution in
+    MILP_SECONDS, the keyed decode falls back to figures, and figures take
+    their best shape."""
     mask = np.full(1 << BUTTONS, -np.inf)
     mask[list(allowed)] = 0
     logp = _log_softmax(logits[:, :1 << BUTTONS] + mask)
@@ -602,31 +642,54 @@ def figure_shapes(logits: np.ndarray, allowed, power: float, keys: np.ndarray | 
     size = FACTOR_OF[:, 0]
     sharp = expected ** power
     quota = (sharp * np.bincount(size, weights=expected)[size]
-             / np.maximum(np.bincount(size, weights=sharp)[size], 1e-12))[list(allowed)]
+             / np.maximum(np.bincount(size, weights=sharp)[size], 1e-12))
+    if adjacent_share is not None:
+        pairs = size == 2
+        pair_notes = quota[pairs].sum()
+        for members, share in ((pairs & ROW_ADJACENT, adjacent_share), (pairs & ~ROW_ADJACENT, 1 - adjacent_share)):
+            quota[members] *= share * pair_notes / max(quota[members].sum(), 1e-12)
+    quota = quota[list(allowed)]
     gain = np.zeros((group.max() + 1, len(logp[0])))
     np.add.at(gain, group, logp)
     gain = gain[:, list(allowed)]
     n_groups, n_shapes = gain.shape
+    pairs, counts = np.unique(np.stack([group[:-1], group[1:]], 1)[group[:-1] != group[1:]], axis=0,
+                              return_counts=True)
+    if not switch_weight:
+        pairs, counts = pairs[:0], counts[:0]
+    switched = np.arange(len(pairs) * 3)
+    width = gain.size + len(switched)
     choices = np.arange(gain.size)
-    one_shape = coo_matrix((np.ones(gain.size), (choices // n_shapes, choices)), shape=(n_groups, gain.size))
+    one_shape = coo_matrix((np.ones(gain.size), (choices // n_shapes, choices)), shape=(n_groups, width))
     notes = coo_matrix((np.bincount(group)[choices // n_shapes].astype(float), (choices % n_shapes, choices)),
-                       shape=(n_shapes, gain.size))
+                       shape=(n_shapes, width))
     # One row per shape and figure f whose next figure starts with P(SAME) <= DIFFERENT_SAME.
     sure = np.flatnonzero(same[starts][1:] <= DIFFERENT_SAME) if keys is None else np.zeros(0, dtype=np.int64)
     pair = (sure[:, None] * n_shapes + np.arange(n_shapes)).ravel()
     different = coo_matrix((np.ones(2 * len(pair)), (np.tile(np.arange(len(pair)), 2),
                                                       np.concatenate([pair, pair + n_shapes]))),
-                           shape=(len(pair), gain.size))
+                           shape=(len(pair), width))
+    # Row 3p + r: the continuous switched variable of group pair p is at least 1 when the first group's shape
+    # sits on row r (white, black, both) and the second group's shape is fretted on another row.
+    row_of = FACTOR_OF[list(allowed), 1]
+    lead = np.where(row_of == np.arange(3)[:, None], 1.0, np.where(row_of < 0, -1.0, 0.0))[switched % 3]
+    first, second = (pairs[switched // 3, side, None] * n_shapes + np.arange(n_shapes) for side in (0, 1))
+    switch = coo_matrix((np.concatenate([lead.ravel(), -np.abs(lead).ravel(), -np.ones(len(switched))]),
+                         (np.concatenate([np.tile(np.repeat(switched, n_shapes), 2), switched]),
+                          np.concatenate([first.ravel(), second.ravel(), gain.size + switched]))),
+                        shape=(len(switched), width))
     low, high = QUOTA_BOUNDS
-    found = milp(-gain.ravel(), integrality=np.ones(gain.size), bounds=Bounds(0, 1),
+    found = milp(np.concatenate([-gain.ravel(), switch_weight * np.repeat(counts, 3)]),
+                 integrality=np.arange(width) < gain.size, bounds=Bounds(0, 1),
                  constraints=[LinearConstraint(one_shape, 1, 1),
                               LinearConstraint(notes, np.maximum(np.floor(quota * low) - 1, 0),
                                                np.ceil(quota * high) + 2),
-                              LinearConstraint(different, 0, 1)],
+                              LinearConstraint(different, 0, 1),
+                              LinearConstraint(switch, -np.inf, 0)],
                  options={"time_limit": MILP_SECONDS})
     if found.x is None and keys is not None:
-        return figure_shapes(logits, allowed, power)
-    best = gain.argmax(1) if found.x is None else found.x.reshape(gain.shape).argmax(1)
+        return figure_shapes(logits, allowed, power, switch_weight=switch_weight, adjacent_share=adjacent_share)
+    best = gain.argmax(1) if found.x is None else found.x[:gain.size].reshape(gain.shape).argmax(1)
     return np.array(allowed)[best][group]
 
 

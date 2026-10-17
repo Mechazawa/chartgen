@@ -263,6 +263,23 @@ def test_ghl_expert_notes_of_one_pitch_in_a_passage_share_a_shape():
         assert len(set(out[keys == key])) == 1, (key, out)
 
 
+def test_ghl_expert_switch_weight_keeps_neighbouring_groups_on_one_row():
+    from chartgen import ghl
+
+    rng = np.random.default_rng(2)
+    relations = np.zeros((40, ghl.RELATIONS))
+    relations[:, ghl.SAME] = -5.0
+    keys = rng.integers(0, 10, 40)
+    shapes = rng.normal(size=(40, 64)) - 30.0
+    shapes[:, [1, 2, 8, 16]] = rng.normal(size=(40, 4))  # W1 W2 B1 B2
+
+    def switches(weight):
+        rows = ghl.FACTOR_OF[ghl.figure_shapes(np.hstack([shapes, relations]), list(range(64)), 1.0, keys, weight), 1]
+        return int((rows[1:] != rows[:-1]).sum())
+
+    assert switches(10.0) < switches(0.0), (switches(10.0), switches(0.0))
+
+
 def test_ghl_tier_switch_weight_keeps_the_row():
     from chartgen import ghl
 
@@ -301,13 +318,26 @@ def test_ghl_bars_whose_audio_repeats_take_the_earlier_bars_notes():
         envelope[begin - start:begin - start + len(riff)] = riff
     ticks = np.sort(rng.choice(np.arange(0, 16 * bar, RESOLUTION // 4), 120, replace=False))
     shapes = rng.integers(1, 64, len(ticks))
-    out_ticks, out_shapes, origin = ghl.copy_repeated_bars(ticks, shapes, tempo, 0, envelope, {}, [], {})
+    source = ghl.repeat_sources(ghl.slots(tempo, tempo.beat_to_time(64))[1], 0, envelope, {}, [])
+    out_ticks, out_shapes, origin = ghl.copy_repeated_bars(ticks, shapes, RESOLUTION, 0, source)
     first = [(t, s) for t, s in zip(out_ticks, out_shapes, strict=True) if t < bar]
     for k in (1, 2, 3):
         later = [(t - k * bar, s) for t, s in zip(out_ticks, out_shapes, strict=True) if k * bar <= t < (k + 1) * bar]
         assert later == first, k
     assert (origin[out_ticks >= bar][:len(first)] >= 0).all()
     assert (origin[out_ticks >= 4 * bar] == -1).mean() > 0.5
+
+
+def test_ghl_timing_logits_of_repeated_bars_pool_over_the_repeat_chain():
+    from chartgen import ghl
+
+    bar_slots = ghl.BAR_BEATS * ghl.SLOTS_PER_BEAT
+    logits = np.arange(2 + 4 * bar_slots, dtype=float)
+    out = ghl.pool_repeats(logits, 0, np.array([-1, 0, -1, 1]))  # bars 0, 1 and 3 form one chain
+    bars, before = out[:4 * bar_slots].reshape(4, bar_slots), logits[:4 * bar_slots].reshape(4, bar_slots)
+    for bar in (0, 1, 3):
+        assert np.allclose(bars[bar], before[[0, 1, 3]].mean(0)), bar
+    assert np.allclose(bars[2], before[2]) and (out[-2:] == logits[-2:]).all()
 
 def test_write_chart_merges_lyrics_into_events_in_tick_order():
     t = steady()
