@@ -11,6 +11,7 @@ pitches heard around it, and ReduceNet derives Hard, Medium and Easy from
 the Expert shapes.
 """
 import bisect
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,8 @@ ENVELOPE_FRAMES = 2  # envelope samples either side of a slot
 STEM_ENVELOPES = ("guitar", "bass", "drums", "vocals", "piano", "sw_other")
 CONTRAST_FRAMES = 20  # the guitar's local level, against which its peak counts
 ENVELOPE_CAP = 10.0
+GUITAR_ONSET_SR, GUITAR_ONSET_FPS = 44100, 100  # madmom's CNN onset detector
+GUITAR_ONSET_FRAMES = 2  # activation frames either side of a slot
 # A bar whose audio matches one of the REPEAT_BARS bars before it at
 # REPEAT_Z standard deviations above the song's mean bar-pair similarity
 # takes that bar's notes, after pool_repeats. On the held-out songs 38% of
@@ -57,7 +60,7 @@ BAR_BEATS, REPEAT_BARS, REPEAT_Z = 4, 8, 1.5
 # shape: the official charts give a pitch one shape 70-73% of the time per
 # 4 bars, and per-note or per-figure picks move every note of a riff.
 PASSAGE_BARS = 16
-N_TIMING = N_FEATURES - 2 + 7 + (1 + len(STEM_ENVELOPES)) * (2 * ENVELOPE_FRAMES + 1) + 1
+N_TIMING = N_FEATURES - 2 + 7 + (1 + len(STEM_ENVELOPES)) * (2 * ENVELOPE_FRAMES + 1) + 1 + 2 * GUITAR_ONSET_FRAMES + 2
 # Official Expert notes with at least this long a gap to the next note are
 # sustained, to that next note (F1 0.80 on held-out songs; opens never are).
 SUSTAIN_GAP_S = 0.3
@@ -196,6 +199,25 @@ def features(times: np.ndarray, beat_phase: np.ndarray, sustain_s: np.ndarray,
     return np.hstack([stats, stats - before, after - stats, _context(stats, times), scalars]).astype(np.float32)
 
 
+@cache
+def _onset_cnn():
+    from madmom.features.onsets import CNNOnsetProcessor
+
+    return CNNOnsetProcessor()
+
+
+def guitar_onsets(guitar: np.ndarray, sr: int) -> np.ndarray:
+    """madmom's CNN onset activation of the separated guitar, GUITAR_ONSET_FPS
+    frames a second. It tells official note slots from the rest at AUC 0.81
+    against 0.75 for the guitar's onset_envelope(), mostly on fast picked
+    and palm-muted parts that spectral flux smears."""
+    import librosa
+
+    if sr != GUITAR_ONSET_SR:
+        guitar = librosa.resample(guitar, orig_sr=sr, target_sr=GUITAR_ONSET_SR)
+    return _onset_cnn()(np.ascontiguousarray(guitar, dtype=np.float32)).astype(np.float32)
+
+
 def onset_envelope(y: np.ndarray, sr: int) -> np.ndarray:
     """librosa onset strength of the mix at ENVELOPE_SR, over its 95th
     percentile."""
@@ -216,12 +238,13 @@ def slots(tempo, end_s: float) -> tuple[np.ndarray, np.ndarray]:
 
 
 def timing_features(ticks: np.ndarray, times: np.ndarray, res: int, envelope: np.ndarray,
-                    stem_envelopes: dict, mix_events, stem_events: dict) -> np.ndarray:
+                    stem_envelopes: dict, mix_events, stem_events: dict, guitar_onsets: np.ndarray) -> np.ndarray:
     """[N, N_TIMING] per slot: the pitch statistics of features(), how many
     onsets of any stream fall within MERGE_S and how far the nearest is,
     which grids it belongs to, the onset envelope of the mix and of every
-    STEM_ENVELOPES stem around it, and the guitar's peak over its local
-    level. A missing stem reads as silence."""
+    STEM_ENVELOPES stem around it, the guitar's peak over its local level,
+    and guitar_onsets() around it with its peak over its local level. A
+    missing stem reads as silence."""
     beat = ticks / res
     x = features(times, beat % 1, np.zeros_like(times), mix_events, stem_events)
     x = np.delete(x, [N_FEATURES - 4, N_FEATURES - 1], axis=1)  # sustain and key shift
@@ -234,11 +257,11 @@ def timing_features(ticks: np.ndarray, times: np.ndarray, res: int, envelope: np
         nearest = np.full(len(times), 1.0)
     frame = np.round((times + ONSET_LAG_S) * ENVELOPE_SR / ENVELOPE_HOP).astype(int)
 
-    def around(env, frames):
+    def around(env, frames, at=frame):
         # A near-silent stem's envelope over its own 95th percentile can
         # overflow float16 storage; cap it at ENVELOPE_CAP.
         env = np.clip(np.nan_to_num(np.asarray(env, dtype=np.float32), posinf=ENVELOPE_CAP), 0, ENVELOPE_CAP)
-        return np.stack([env[np.clip(frame + d, 0, len(env) - 1)] if len(env) else np.zeros(len(times))
+        return np.stack([env[np.clip(at + d, 0, len(env) - 1)] if len(env) else np.zeros(len(times))
                          for d in frames], 1)
 
     near = range(-ENVELOPE_FRAMES, ENVELOPE_FRAMES + 1)
@@ -248,7 +271,11 @@ def timing_features(ticks: np.ndarray, times: np.ndarray, res: int, envelope: np
     slot = ticks % res * SLOTS_PER_BEAT // res
     grid = np.stack([np.log1p(high - low), np.log1p(nearest * 100), slot % 3 == 0, slot % 4 == 0,
                      slot % 2 == 0, np.sin(np.pi * beat), np.cos(np.pi * beat)], 1)
-    return np.hstack([x, grid, around(envelope, near), *stems, contrast[:, None]]).astype(np.float32)
+    cnn_frame = np.round(times * GUITAR_ONSET_FPS).astype(int)
+    cnn = around(guitar_onsets, range(-GUITAR_ONSET_FRAMES, GUITAR_ONSET_FRAMES + 1), cnn_frame)
+    cnn_contrast = cnn.max(1) - around(guitar_onsets, range(-CONTRAST_FRAMES, CONTRAST_FRAMES + 1), cnn_frame).mean(1)
+    return np.hstack([x, grid, around(envelope, near), *stems, contrast[:, None], cnn,
+                      cnn_contrast[:, None]]).astype(np.float32)
 
 
 def pick_slots(logits: np.ndarray, times: np.ndarray, threshold: float) -> np.ndarray:
@@ -447,10 +474,11 @@ def _models(device: str):
     return _MODELS[device]
 
 
-def chart_tiers(tempo, envelope, stem_envelopes, mix_events, stem_events) -> dict[str, list]:
+def chart_tiers(tempo, envelope, stem_envelopes, guitar_onsets, mix_events, stem_events) -> dict[str, list]:
     """{"ExpertGHLGuitar": notes, "HardGHLGuitar": ...}, or {} when no
     trained model ships. envelope is onset_envelope() of the mix and
-    stem_envelopes the same for each separated stem."""
+    stem_envelopes the same for each separated stem; guitar_onsets is
+    guitar_onsets() of the separated guitar."""
     onsets = [e[0] for events in [mix_events, *stem_events.values()] for e in events]
     if not MODEL_PATH.is_file() or not onsets:
         return {}
@@ -459,7 +487,7 @@ def chart_tiers(tempo, envelope, stem_envelopes, mix_events, stem_events) -> dic
     allowed = saved["allowed"]
     res = tempo.resolution
     slot_ticks, slot_times = slots(tempo, max(onsets) + 1.0)
-    x = timing_features(slot_ticks, slot_times, res, envelope, stem_envelopes, mix_events, stem_events)
+    x = timing_features(slot_ticks, slot_times, res, envelope, stem_envelopes, mix_events, stem_events, guitar_onsets)
     downbeat = None if tempo.downbeat_phase is None else tempo.pickup_beats + tempo.downbeat_phase
     source = np.zeros(0, dtype=np.int64) if downbeat is None else repeat_sources(
         slot_times, downbeat, envelope, stem_envelopes, list(mix_events) + list(stem_events.get("guitar", [])))

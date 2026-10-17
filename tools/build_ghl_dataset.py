@@ -14,7 +14,9 @@ grid the pipeline detects ("tempo": (beat_times, pickup_beats,
 downbeat_phase)) and the mix's onset envelope ("onset_env",
 chartgen.ghl.onset_envelope); a record without them gets them added on
 the next run, so deleting those keys refreshes them after a change to
-either detector.
+either detector. --stem-envelopes adds every stem's onset envelope
+("stem_env") and --guitar-onsets the CNN onset activation of the separated
+guitar ("guitar_onsets"), keeping that guitar as FLAC in data/ghl-guitar.
 
     python -m tools.build_ghl_dataset data/ghl-official -o data/ghl-features
 """
@@ -36,6 +38,7 @@ import soundfile as sf  # noqa: E402
 from chartgen import ghl, prominence, stems, tempo, transcribe  # noqa: E402
 from tools.ghl_charts import load  # noqa: E402
 
+GUITARS = Path("data/ghl-guitar")
 NOT_MUSIC = ("preview.opus", "crowd.opus")
 TRANSCRIBE_WORKERS = 12
 
@@ -91,6 +94,40 @@ def add_stem_envelopes(built: list[tuple[Path, Path]]) -> None:
         print(f"[{index}/{len(todo)}] {folder.name} {time.time() - started:.0f}s", flush=True)
 
 
+def add_guitar_onsets(built: list[tuple[Path, Path]]) -> None:
+    """Store chartgen.ghl.guitar_onsets of each record's separated guitar
+    ("guitar_onsets"), for records that lack it. The separated guitar is
+    kept as 16-bit FLAC in GUITARS, so a later feature of the guitar needs
+    no GPU; a song with a FLAC there is not separated again."""
+    GUITARS.mkdir(parents=True, exist_ok=True)
+    todo = [(path, folder) for path, folder in built if "guitar_onsets" not in pickle.loads(path.read_bytes())]
+    print(f"adding guitar onsets to {len(todo)} records", flush=True)
+    cpu = ThreadPoolExecutor(1)
+
+    def store(path, wave):
+        write_record(path, pickle.loads(path.read_bytes())
+                     | {"guitar_onsets": ghl.guitar_onsets(wave, stems.SR).astype(np.float16)})
+
+    jobs = []
+    for index, (path, folder) in enumerate(todo, 1):
+        started, flac = time.time(), GUITARS / f"{folder.name}.flac"
+        if flac.exists():
+            wave = sf.read(flac, dtype="float32")[0]
+        else:
+            mono = separate(mix(folder))
+            if mono is None:
+                print(f"skip {folder.name}: BS-RoFormer separation failed", flush=True)
+                continue
+            wave = mono["guitar"]
+            sf.write(flac, wave, stems.SR, subtype="PCM_16")
+        jobs.append(cpu.submit(store, path, wave))
+        while len(jobs) > 2:  # bounds the guitars held in memory
+            jobs.pop(0).result()
+        print(f"[{index}/{len(todo)}] {folder.name} {time.time() - started:.0f}s", flush=True)
+    for job in jobs:
+        job.result()
+
+
 def transcribe_audio(audio: np.ndarray) -> list:
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fh:
         path = fh.name
@@ -119,6 +156,8 @@ def main(argv=None):
     ap.add_argument("-o", "--out", type=Path, default=Path("data/ghl-features"))
     ap.add_argument("--stem-envelopes", action="store_true",
                     help="also separate every song again and store its stems' onset envelopes")
+    ap.add_argument("--guitar-onsets", action="store_true",
+                    help="also store the CNN onset activation of every song's separated guitar")
     args = ap.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -171,6 +210,8 @@ def main(argv=None):
     pool.shutdown()
     if args.stem_envelopes:
         add_stem_envelopes([(args.out / f"{f.name}.pkl", f) for f in folders if (args.out / f"{f.name}.pkl").exists()])
+    if args.guitar_onsets:
+        add_guitar_onsets([(args.out / f"{f.name}.pkl", f) for f in folders if (args.out / f"{f.name}.pkl").exists()])
     return 0
 
 

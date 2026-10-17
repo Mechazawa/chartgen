@@ -198,7 +198,7 @@ def test_ghl_tiers_follow_the_official_ladder_and_sustain_rules():
         try:
             events = [(0.5 + i * 0.5, 0.7 + i * 0.5, 40 + i % 24, 0.8) for i in range(150)]
             tempo = steady(n=200)
-            out = ghl.chart_tiers(tempo, np.ones(4000, dtype=np.float32), {}, events, {"guitar": events})
+            out = ghl.chart_tiers(tempo, np.ones(4000, dtype=np.float32), {}, (), events, {"guitar": events})
         finally:
             ghl.MODEL_PATH = saved_path
             ghl._MODELS.clear()

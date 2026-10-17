@@ -133,7 +133,7 @@ def timing_arrays(record: dict, delay_s: float) -> tuple[dict, tuple]:
     label = np.zeros(len(times), dtype=np.float32)
     label[nearest[np.abs(times[nearest] - official) <= SLOT_MATCH_S]] = 1
     x = ghl.timing_features(ticks, times, tempo.RESOLUTION, record["onset_env"], record.get("stem_env", {}),
-                            record["mix"], record["stems"])
+                            record["mix"], record["stems"], record.get("guitar_onsets", np.zeros(0)))
     return {"x": x.astype(np.float16), "label": label}, (ticks, times, official)
 
 
@@ -548,6 +548,8 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=3, help="picks the songs --train-share keeps")
     ap.add_argument("--recalibrate", type=Path, metavar="MODEL",
                     help="reuse the networks in MODEL and redo only the validation-tuned decoding")
+    ap.add_argument("--retrain-timing", action="store_true",
+                    help="with --recalibrate, train TimingNet again (its saved configuration) instead of reusing it")
     ap.add_argument("-o", "--out", type=Path, default=ghl.MODEL_PATH)
     ap.add_argument("--runs", type=Path, default=Path("data/ghl-runs"))
     args = ap.parse_args(argv)
@@ -582,12 +584,20 @@ def main(argv=None):
     configs = [{k: rng.choice(v) for k, v in SWEEP.items()} for _ in range(args.sweep)] or [args.config or DEFAULT]
     if args.recalibrate:
         saved = torch.load(args.recalibrate, map_location=device)
-        nets = [net(**saved["config"][name]).to(device).eval()
-                for name, net in (("timing", ghl.TimingNet), ("shape", ghl.ShapeNet), ("reduce", ghl.ReduceNet))]
-        for net, name in zip(nets, ("timing", "shape", "reduce"), strict=True):
-            net.load_state_dict({k: v.float() for k, v in saved[name].items()}, strict=False)
-        timing_net, shape_net, reduce_net = nets
-        timing_config, shape_config, reduce_config = (saved["config"][k] for k in ("timing", "shape", "reduce"))
+
+        def restored(name, net):
+            model = net(**saved["config"][name]).to(device).eval()
+            model.load_state_dict({k: v.float() for k, v in saved[name].items()}, strict=False)
+            return model, saved["config"][name]
+
+        shape_net, shape_config = restored("shape", ghl.ShapeNet)
+        reduce_net, reduce_config = restored("reduce", ghl.ReduceNet)
+        if args.retrain_timing:
+            config = args.config or {"lr": DEFAULT["lr"]} | saved["config"]["timing"]
+            timing_net, timing_config = fit(ghl.TimingNet, [config], train_timing, [t for t, _ in val_timing],
+                                            args.steps, args.batch, device, timing_loss(device), runs / "timing")
+        else:
+            timing_net, timing_config = restored("timing", ghl.TimingNet)
         shape_net.temperature.fill_(1.0)
         shape_net.shape_bias.zero_()
     else:
